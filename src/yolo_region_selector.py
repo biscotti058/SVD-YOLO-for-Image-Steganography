@@ -32,7 +32,8 @@ class YOLORegionSelector:
         Parameters
         ----------
         model_name : str
-            YOLO model to use. 'yolov8n.pt' is the nano (fastest) model.
+            YOLO model: 'yolov8n.pt' (nano, default, fast), 'yolov8s.pt', 'yolov8m.pt',
+            'yolov8l.pt', 'yolov8x.pt' (larger = more accurate, GPU recommended).
         confidence : float
             Minimum detection confidence threshold.
         """

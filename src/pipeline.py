@@ -47,7 +47,8 @@ class StegoPipeline:
         mode : str
             One of 'svd_only', 'svd_texture', 'svd_yolo'
         yolo_model : str
-            YOLO model name
+            YOLO model: 'yolov8n.pt' (nano, default, fast), 'yolov8s.pt', 'yolov8m.pt',
+            'yolov8l.pt', 'yolov8x.pt' (larger = more accurate, GPU recommended).
         yolo_confidence : float
             YOLO detection confidence threshold
         """

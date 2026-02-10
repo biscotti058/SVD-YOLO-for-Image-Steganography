@@ -82,6 +82,19 @@ Or in VS Code / Cursor, just open `demo.ipynb` and run all cells.
 | 0.05  | ~25-30    | >0.95  | Moderate         |
 | 0.1   | ~20-25    | >0.90  | Poor             |
 
+## Limitazioni
+
+- **Chiavi di decodifica**: Per estrarre il segreto serve il file `keys.npz` (matrici U, V dell'SVD). Il destinatario deve ricevere anche le chiavi; non è steganografia "blind" (solo password/seme).
+- **Robustezza**: Compressione JPEG aggressiva, ridimensionamento forte e rumore elevato possono degradare o perdere il messaggio.
+- **Solo nascondimento**: I dati non sono cifrati; chi estrae il payload dall'SVD vede il segreto in chiaro.
+
+## Sviluppi futuri
+
+- Steganografia **blind**: recupero del messaggio con sola password/seme, senza trasmettere le matrici SVD.
+- **Crittografia** (es. AES) del payload prima dell'embedding, per confidenzialità anche in caso di estrazione.
+- Scelta esplicita del **modello YOLO** (n/s/m/l/x) dalla pipeline per bilanciare velocità (CPU) e precisione (GPU).
+- Adattamento locale di **α** in base alla complessità della regione.
+
 ## Technologies
 
 - **Python 3.10+**
