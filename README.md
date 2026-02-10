@@ -82,18 +82,18 @@ Or in VS Code / Cursor, just open `demo.ipynb` and run all cells.
 | 0.05  | ~25-30    | >0.95  | Moderate         |
 | 0.1   | ~20-25    | >0.90  | Poor             |
 
-## Limitazioni
+## Limitations
 
-- **Chiavi di decodifica**: Per estrarre il segreto serve il file `keys.npz` (matrici U, V dell'SVD). Il destinatario deve ricevere anche le chiavi; non è steganografia "blind" (solo password/seme).
-- **Robustezza**: Compressione JPEG aggressiva, ridimensionamento forte e rumore elevato possono degradare o perdere il messaggio.
-- **Solo nascondimento**: I dati non sono cifrati; chi estrae il payload dall'SVD vede il segreto in chiaro.
+- **Decoding keys**: Extracting the secret requires the `keys.npz` file (U, V matrices from SVD). The recipient must receive the keys; this is not "blind" steganography (password/seed only).
+- **Robustness**: Aggressive JPEG compression, heavy resizing, and strong noise can degrade or destroy the message.
+- **Hiding only**: Data is not encrypted; anyone who extracts the payload from the SVD sees the secret in the clear.
 
-## Sviluppi futuri
+## Future developments
 
-- Steganografia **blind**: recupero del messaggio con sola password/seme, senza trasmettere le matrici SVD.
-- **Crittografia** (es. AES) del payload prima dell'embedding, per confidenzialità anche in caso di estrazione.
-- Scelta esplicita del **modello YOLO** (n/s/m/l/x) dalla pipeline per bilanciare velocità (CPU) e precisione (GPU).
-- Adattamento locale di **α** in base alla complessità della regione.
+- **Blind steganography**: recover the message with only a password/seed, without transmitting SVD matrices.
+- **Encryption** (e.g. AES) of the payload before embedding, for confidentiality even if the payload is extracted.
+- Explicit **YOLO model** choice (n/s/m/l/x) in the pipeline to balance speed (CPU) and accuracy (GPU).
+- Local adaptation of **α** based on region complexity.
 
 ## Technologies
 
