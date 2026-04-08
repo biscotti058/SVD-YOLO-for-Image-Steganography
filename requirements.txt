@@ -6,9 +6,14 @@ scikit-image==0.22.0
 matplotlib==3.8.2
 jupyter==1.0.0
 ipywidgets==8.1.1
+<<<<<<< HEAD
 qrcode[pil]==7.4.2
 tqdm>=4.60.0
 # YOLO + PyTorch
+=======
+# YOLO + PyTorch: range allows CPU/GPU flexibility; for CPU-only use:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
 ultralytics>=8.0.0,<9
 torch>=2.0.0
 torchvision>=0.15.0

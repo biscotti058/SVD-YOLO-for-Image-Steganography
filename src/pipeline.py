@@ -3,10 +3,22 @@ SVD + YOLO Steganography Pipeline
 ===================================
 Combines SVD steganography with YOLO-guided region selection
 into a complete encoding/decoding pipeline.
+<<<<<<< HEAD
+=======
+
+Pipeline:
+    1. Load cover image and secret image
+    2. Run YOLO on cover image to find complex regions
+    3. Generate embedding mask from detections + texture analysis
+    4. Apply SVD steganography with mask-guided embedding
+    5. Evaluate quality (PSNR, SSIM)
+    6. Decode and recover secret image
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
 """
 
 import numpy as np
 import os
+<<<<<<< HEAD
 import glob
 import sys
 from typing import Optional, Tuple
@@ -23,6 +35,18 @@ try:
 except ImportError:
     def tqdm(iterable, **kwargs):
         return iterable
+=======
+from typing import Optional, Tuple
+
+from src.svd_steganography import (
+    SVDSteganography,
+    compute_psnr,
+    compute_ssim,
+    load_image,
+    save_image,
+)
+from src.yolo_region_selector import YOLORegionSelector, generate_texture_only_mask
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
 
 
 class StegoPipeline:
@@ -37,6 +61,22 @@ class StegoPipeline:
     
     def __init__(self, alpha: float = 0.01, mode: str = 'svd_yolo',
                  yolo_model: str = 'yolov8n.pt', yolo_confidence: float = 0.25):
+<<<<<<< HEAD
+=======
+        """
+        Parameters
+        ----------
+        alpha : float
+            SVD embedding strength (0.001 - 0.1)
+        mode : str
+            One of 'svd_only', 'svd_texture', 'svd_yolo'
+        yolo_model : str
+            YOLO model: 'yolov8n.pt' (nano, default, fast), 'yolov8s.pt', 'yolov8m.pt',
+            'yolov8l.pt', 'yolov8x.pt' (larger = more accurate, GPU recommended).
+        yolo_confidence : float
+            YOLO detection confidence threshold
+        """
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
         self.alpha = alpha
         self.mode = mode
         self.stego = SVDSteganography(alpha=alpha)
@@ -49,6 +89,10 @@ class StegoPipeline:
         else:
             self.yolo = None
         
+<<<<<<< HEAD
+=======
+        # Results storage
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
         self.mask = None
         self.detections = None
         self.stego_image = None
@@ -57,8 +101,31 @@ class StegoPipeline:
     
     def encode(self, cover_path: str, secret_path: str,
                output_dir: str = 'output') -> dict:
+<<<<<<< HEAD
         os.makedirs(output_dir, exist_ok=True)
         
+=======
+        """
+        Run the full encoding pipeline.
+        
+        Parameters
+        ----------
+        cover_path : str
+            Path to cover image
+        secret_path : str
+            Path to secret image
+        output_dir : str
+            Directory to save outputs
+            
+        Returns
+        -------
+        results : dict
+            Dictionary with metrics and file paths
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Load images
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
         cover = load_image(cover_path)
         secret = load_image(secret_path)
         
@@ -68,6 +135,10 @@ class StegoPipeline:
         print(f"Alpha: {self.alpha}")
         print()
         
+<<<<<<< HEAD
+=======
+        # Generate mask based on mode
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
         if self.mode == 'svd_yolo':
             print("Running YOLO object detection...")
             self.detections = self.yolo.detect_objects(cover)
@@ -78,6 +149,10 @@ class StegoPipeline:
             print("Generating YOLO-guided embedding mask...")
             self.mask = self.yolo.generate_embedding_mask(cover)
             
+<<<<<<< HEAD
+=======
+            # Save mask visualization
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
             mask_vis = self.yolo.visualize_mask(cover, self.mask, self.detections)
             save_image(mask_vis, os.path.join(output_dir, 'mask_visualization.png'))
             
@@ -88,6 +163,7 @@ class StegoPipeline:
             print("No mask (basic SVD mode)")
             self.mask = None
         
+<<<<<<< HEAD
         print("\nEncoding secret image using SVD...")
         self.stego_image = self.stego.encode(cover, secret, mask=self.mask)
         
@@ -97,6 +173,21 @@ class StegoPipeline:
         keys_path = os.path.join(output_dir, 'keys.npz')
         self.stego.save_keys(keys_path)
         
+=======
+        # Encode
+        print("\nEncoding secret image using SVD...")
+        self.stego_image = self.stego.encode(cover, secret, mask=self.mask)
+        
+        # Save stego image
+        stego_path = os.path.join(output_dir, 'stego_image.png')
+        save_image(self.stego_image, stego_path)
+        
+        # Save keys
+        keys_path = os.path.join(output_dir, 'keys.npz')
+        self.stego.save_keys(keys_path)
+        
+        # Compute quality metrics
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
         psnr = compute_psnr(cover, self.stego_image)
         ssim = compute_ssim(cover, self.stego_image)
         
@@ -126,6 +217,7 @@ class StegoPipeline:
     
     def decode(self, stego_path: str, keys_path: str,
                output_dir: str = 'output') -> np.ndarray:
+<<<<<<< HEAD
         os.makedirs(output_dir, exist_ok=True)
         
         stego = load_image(stego_path)
@@ -146,11 +238,70 @@ class StegoPipeline:
             print(f"  QR Code decoded successfully: \"{qr_text}\"")
         else:
             print(f"  QR Code decoding failed (too much distortion)")
+=======
+        """
+        Run the decoding pipeline.
+        
+        Parameters
+        ----------
+        stego_path : str
+            Path to stego image
+        keys_path : str
+            Path to keys file
+        output_dir : str
+            Directory to save outputs
+            
+        Returns
+        -------
+        recovered : np.ndarray
+            Recovered secret image
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Load stego image
+        stego = load_image(stego_path)
+        
+        # Load keys
+        decoder = SVDSteganography()
+        decoder.load_keys(keys_path)
+        
+        # Decode
+        print("Decoding secret image...")
+        self.recovered_secret = decoder.decode(stego)
+        
+        # Save recovered secret
+        recovered_path = os.path.join(output_dir, 'recovered_secret.png')
+        save_image(self.recovered_secret, recovered_path)
+        
+        print(f"Recovered secret saved: {recovered_path}")
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
         
         return self.recovered_secret
     
     def compare_modes(self, cover_path: str, secret_path: str,
                       alphas: list = None, output_dir: str = 'output') -> list:
+<<<<<<< HEAD
+=======
+        """
+        Compare different steganography modes and alpha values.
+        
+        Parameters
+        ----------
+        cover_path : str
+            Path to cover image
+        secret_path : str
+            Path to secret image
+        alphas : list of float
+            Alpha values to test
+        output_dir : str
+            Output directory
+            
+        Returns
+        -------
+        all_results : list of dict
+            Results for each configuration
+        """
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
         if alphas is None:
             alphas = [0.001, 0.005, 0.01, 0.05, 0.1]
         
@@ -170,14 +321,23 @@ class StegoPipeline:
                     sub_dir = os.path.join(output_dir, f'{mode}_alpha{alpha}')
                     result = pipeline.encode(cover_path, secret_path, sub_dir)
                     
+<<<<<<< HEAD
+=======
+                    # Also decode and measure recovery quality
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
                     recovered = pipeline.decode(
                         result['stego_path'], result['keys_path'], sub_dir
                     )
                     
+<<<<<<< HEAD
+=======
+                    # Secret recovery quality
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
                     secret_resized = pipeline.stego._resize_secret(cover, secret)
                     recovery_psnr = compute_psnr(secret_resized, recovered)
                     recovery_ssim = compute_ssim(secret_resized, recovered)
                     
+<<<<<<< HEAD
                     # QR decode check
                     qr_text = verify_qr_decode(recovered)
                     
@@ -185,6 +345,10 @@ class StegoPipeline:
                     result['metrics']['recovery_ssim'] = recovery_ssim
                     result['metrics']['qr_decoded'] = qr_text is not None
                     result['metrics']['qr_text'] = qr_text or ""
+=======
+                    result['metrics']['recovery_psnr'] = recovery_psnr
+                    result['metrics']['recovery_ssim'] = recovery_ssim
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
                     
                     all_results.append(result)
                     
@@ -197,6 +361,7 @@ class StegoPipeline:
                     })
         
         return all_results
+<<<<<<< HEAD
 
     def evaluate_dataset(self, cover_dir: str, secret_path: str,
                          output_dir: str = 'output/dataset_results') -> list:
@@ -238,3 +403,5 @@ class StegoPipeline:
                 print(f"Errore su {filename}: {e}")
                 
         return results
+=======
+>>>>>>> 1a18a606ff5809894d00e4d88aa295400c16bd36
