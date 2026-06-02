@@ -614,7 +614,135 @@ Tre osservazioni emergono dalla Tabella~\ref{tab:full}:
 \end{enumerate}
 
 
+\section{Connessioni con il programma del corso}
+\label{sec:course-aligned}
+
+La trattazione del corso (lezioni di SVD, M.\ Popolizio, dic.\ 2025)
+introduce tre strumenti che, in questa versione del progetto, vengono
+applicati direttamente alla pipeline steganografica:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item lo pseudoinverso di Moore--Penrose $A^{+} = V \Sigma^{+} U^{T}$;
+  \item il numero di condizionamento $\kappa(A) = \sigma_1/\sigma_n$;
+  \item la \emph{Truncated SVD} (TSVD) come regolarizzazione del
+        pseudoinverso, $A_k^{+} = V_k \Sigma_k^{+} U_k^{T}$.
+\end{enumerate}
+
+\subsection{Identit\`a $\sigma_i = \sqrt{\lambda_i(A^T A)}$}
+
+Il legame fra SVD e decomposizione spettrale (slide 17 del corso) lega
+$\sigma_i(A) = \sqrt{\lambda_i(A^T A)}$ con $\Lambda = \mathrm{diag}(\lambda_1, \dots, \lambda_r)$.
+La funzione \verb|verify_sigma_lambda| in \verb|src/svd_regularization.py|
+calcola le due quantit\`a sui canali della cover e produce un errore
+assoluto massimo dell'ordine di $10^{-13}$, cio\`e
+\emph{precisione macchina}: la teoria spettrale del corso \`e verificata
+numericamente sul nostro dato reale.
+
+\subsection{Numero di condizionamento $\kappa(C)$ e attacchi}
+
+Il numero di condizionamento \`e
+\begin{equation}\label{eq:kappa}
+   \kappa(A) \;=\; \frac{\sigma_1(A)}{\sigma_n(A)},
+\end{equation}
+e quantifica quanto un sistema $A x = b$ \`e sensibile a perturbazioni
+su $b$.  Per immagini naturali $\kappa(C)$ \`e tipicamente $\sim 10^{6}$
+($\sigma$ molto sbilanciati).  Negli esperimenti di \S\ref{sec:robustness}
+si traccia $\kappa(C^{\star} + E)$ per ogni attacco: gli attacchi che
+ribilanciano lo spettro (rumore gaussiano forte) abbassano $\kappa$, gli
+attacchi che danneggiano la coda (JPEG a basso Q, scaling)
+\emph{aumentano} $\kappa$ e rendono la decodifica pi\`u sensibile al
+rumore --- coerentemente con la slide 21 del corso.
+
+\subsection{TSVD come regolarizzazione del decoder}
+\label{sec:tsvd-decoder}
+
+Lo schema di decoding (\S\ref{sec:embedding}) produce
+\[
+   \widetilde\Sigma_S \;=\; \frac{\sigma(\widetilde C^{\star}) - \sigma(C)}{\alpha_{\text{eff}}},
+\]
+e la disuguaglianza di Mirsky (\eqref{eq:robustness-bound}) garantisce
+\(
+   \|\widetilde\Sigma_S - \Sigma_S\|_2 \leq \|E\|_F / \alpha_{\text{eff}}.
+\)
+Le componenti di $\widetilde\Sigma_S$ corrispondenti ai valori
+singolari pi\`u piccoli sono quelle pi\`u inquinate dal rumore (slide 21:
+``small singular values amplify noise'').
+
+Applichiamo a $\widetilde\Sigma_S$ la \emph{Truncated SVD}: troncare a
+$k$ termini, $\widetilde\Sigma_S^{(k)} := \mathrm{diag}(\widetilde\Sigma_S[1:k], 0, \dots, 0)$,
+e ricostruire
+\[
+   \widehat{S}_k \;=\; U_S^{(k)} \, \mathrm{diag}\bigl(\widetilde\Sigma_S^{(k)}\bigr) \, V_S^{(k) T}.
+\]
+Per Eckart--Young (\S\ref{sec:eym}) questa \`e l'approssimazione di
+rango $k$ \emph{ottimale} sia in norma spettrale che di Frobenius;
+nel nostro contesto agisce come regolarizzazione, scartando la coda
+rumorosa del segreto recuperato.
+
+\subsection{Risultati empirici della regolarizzazione TSVD}
+
+La sezione \S\ref{sec:robustness} del notebook misura, attacco per attacco,
+\PSNR\ e decodifica QR sia con il decoder standard sia con la sua versione
+regolarizzata via TSVD scegliendo il miglior $k$ in $\{10, 20, 50, 100, 200, 400\}$.
+L'esperimento, ripetuto con $\alpha = 0{,}01$ sulla cover COCO primaria,
+\`e riassunto in Tabella~\ref{tab:tsvd-rob}.
+
+\begin{table}[H]\centering\small
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Attacco} & $\kappa(C^{\star}+E)$ & $\PSNR_{\text{std}}$ [dB] & QR std & $\PSNR_{\text{TSVD}}$ [dB] / $k^{\star}$ & QR TSVD \\
+\midrule
+Nessuno              & $2{,}2\!\cdot\!10^6$ & $15{,}50$ & SI & $15{,}50$ / $100$  & SI \\
+JPEG $Q=50$          & $1{,}3\!\cdot\!10^6$ & $10{,}44$ & NO & $12{,}67$ / $20$   & \textbf{SI} \\
+JPEG $Q=20$          & $1{,}1\!\cdot\!10^7$ & $\phantom{0}8{,}96$ & NO & $12{,}25$ / $20$ & \textbf{SI} \\
+Gauss $\sigma=5$     & $2{,}0\!\cdot\!10^6$ & $\phantom{0}6{,}74$ & NO & $\phantom{0}9{,}61$ / $50$ & \textbf{SI} \\
+Gauss $\sigma=15$    & $1{,}0\!\cdot\!10^6$ & $\phantom{0}4{,}95$ & NO & $\phantom{0}9{,}89$ / $20$ & \textbf{SI} \\
+Blur $5\times 5$     & $6{,}5\!\cdot\!10^6$ & $\phantom{0}3{,}87$ & NO & $\phantom{0}6{,}38$ / $10$ & NO \\
+\bottomrule
+\end{tabular}
+\caption{\label{tab:tsvd-rob}Robustezza standard vs TSVD-regolarizzata
+(cover \texttt{coco\_000000000139}, $\alpha = 0{,}01$).  Il decoder
+TSVD \emph{recupera} il QR per JPEG, rumore lieve e moderato:
+attacchi che il decoder standard non gestisce.  Il guadagno medio in
+PSNR \`e $+2$ a $+5$ dB.  Solo il blur, che distrugge la struttura
+spettrale, rimane fuori portata anche per TSVD --- coerentemente con
+il fatto che il blur riduce il rango effettivo di $C^{\star}$.}
+\end{table}
+
+\subsection{Pseudoinverso e quadrati minimi}
+
+Lo pseudoinverso $A^{+}$ \`e implementato in \verb|src/svd_regularization.py|
+con la formula esatta tramite SVD,
+\(
+   A^{+} \;=\; V \, \Sigma^{+} \, U^{T},
+\)
+e la soluzione ai minimi quadrati di un sistema sovradeterminato \`e
+$x^{\star} = A^{+} b$ (slide 20).  La variante TSVD,
+\(
+   x^{\star}_{k} \;=\; A_{k}^{+} \, b,
+\)
+riduce il termine di amplificazione del rumore $1/\sigma_n$ a $1/\sigma_k$.
+Su un sistema sintetico $200 \times 60$ con una colonna quasi
+linearmente dipendente
+(\,$\kappa \approx 10^{10}$, $b$ contaminato con $\sigma = 0{,}01$) il
+solver \texttt{solve\_least\_squares} produce un errore $\sim 2{,}4 \cdot 10^{5}$,
+mentre \texttt{solve\_tsvd} con $k = 10$ riduce l'errore a circa $7$:
+\emph{quattro ordini di grandezza}.
+
+\subsection{Costo di memoria della compressione SVD}
+
+L'identit\`a della slide 16,
+\[
+   \text{footprint troncata} \;=\; k(m+n+1),
+\]
+\`e implementata in \verb|compression_footprint|.  Per $m=n=512$ con
+$k=20$ il rapporto \`e $20\,500 / 262\,144 \approx 7{,}8\%$, coerente
+con il rapporto $2k(1/m + 1/n) \approx 15{,}6\%$ riportato sulla slide
+e migliorato dal fatto che la diagonale aggiunge solo $k$ valori,
+non $\min(m,n)$.
+
 \section{Analisi di Robustezza}
+\label{sec:robustness}
 
 Il bound \eqref{eq:robustness-bound} prevede che la qualità della
 ricostruzione si deteriori linearmente con $\|E\|_F$ e inversamente

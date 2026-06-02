@@ -91,6 +91,35 @@ class SVDSteganography:
         secret_recovered = np.clip(secret_recovered, 0, 255).astype(np.uint8)
         return secret_recovered
 
+    def decode_tsvd(self, stego_img, k):
+        """
+        TSVD-regularized decoder.
+
+        After computing the singular values of the stego image we keep
+        only the first `k` recovered singular values of the secret
+        (setting the others to zero) before reconstructing.  This
+        applies the lecture's "small singular values amplify noise"
+        principle (Popolizio, slide 21) as a regularization of the
+        steganographic inverse problem.
+
+        See `src/svd_regularization.tsvd_regularized_decode` for the
+        free-function form; this method is provided for convenience so
+        the engine can keep its keys/state.
+        """
+        from src.svd_regularization import tsvd_regularized_decode
+        if self._u_cover is None:
+            raise ValueError("Must call encode() before decode_tsvd(), or load keys.")
+        alpha_eff = (self._effective_alpha
+                     if self._effective_alpha is not None else self.alpha)
+        return tsvd_regularized_decode(
+            self._ensure_3channel(stego_img),
+            cover_singular_values=self._s_cover,
+            secret_U=self._u_secret,
+            secret_Vt=self._vt_secret,
+            alpha_eff=alpha_eff,
+            k=k,
+        )
+
     def save_keys(self, filepath):
         if self._u_cover is None:
             raise ValueError("No keys to save. Run encode() first.")
