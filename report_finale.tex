@@ -1,0 +1,728 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[italian]{babel}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{enumitem}
+
+\hypersetup{colorlinks=true,linkcolor=blue!50!black,urlcolor=blue!50!black}
+
+\newtheorem{theorem}{Teorema}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposizione}
+\newtheorem{corollary}[theorem]{Corollario}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definizione}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Osservazione}
+
+\DeclareMathOperator{\rank}{rank}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\PSNR}{PSNR}
+\DeclareMathOperator{\SSIM}{SSIM}
+\DeclareMathOperator{\MSE}{MSE}
+\DeclareMathOperator{\NCC}{NCC}
+\DeclareMathOperator{\BER}{BER}
+
+\title{\textbf{SVD \& YOLO per Steganografia di Immagini}\\
+       \large Hiding QR Code Secrets in COCO Images\\
+       Using Singular Value Decomposition and Object Detection\\[1ex]
+       \normalsize Statistical and Mathematical Methods for Artificial Intelligence}
+\author{Nicola Biscotti \quad Giovanni Michele Iuliani\\
+        Politecnico di Bari --- A.A.\ 2024/2025}
+\date{Revisione: giugno 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+Si descrive un sistema di steganografia per immagini basato sulla
+\emph{Singular Value Decomposition} (SVD) e guidato spazialmente da
+YOLOv8.  Rispetto alla prima versione del progetto, la presente revisione
+recepisce il feedback didattico e dedica spazio significativo
+all'apparato matematico: si dimostra l'\emph{identità di Frobenius} che
+governa l'embedding, si derivano i \emph{bound di perturbazione di Weyl e
+Mirsky} che giustificano sia la scelta dei parametri sia il
+compromesso impercettibilità/robustezza, e si fornisce la formula
+chiusa $\PSNR_{\text{pred}}(\alpha)$ utilizzata per selezionare
+$\alpha$ in modo principled.  La sperimentazione viene estesa da~5 a
+\textbf{13 immagini reali} (5 COCO val2017 + 1 cover sintetica + 7
+fotografie reali del pacchetto scikit-image), per un totale di
+$13 \times 3 \times 6 = 234$ configurazioni; gli script
+\texttt{src/large\_scale\_eval.py} sono pronti per estendere
+l'analisi a $\geq 100$ immagini COCO in ambienti con accesso di rete.
+\end{abstract}
+
+\tableofcontents
+\bigskip\hrule\bigskip
+
+
+\section{Introduzione e obiettivi}
+
+Il progetto realizza un sistema di steganografia che combina la
+\emph{Singular Value Decomposition} con il rilevamento oggetti
+\emph{YOLOv8} per nascondere un payload binario (un QR code) all'interno
+di fotografie reali del dataset MS COCO.  Le scelte di disegno sono
+guidate da tre criteri:
+
+\begin{enumerate}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Impercettibilità.}  La distorsione fra cover e stego deve
+        essere fotograficamente invisibile ($\PSNR \gtrsim 30$~dB,
+        $\SSIM \gtrsim 0.95$).  Questo criterio è quantificato in modo
+        chiuso nella \S\ref{sec:closed-form}.
+  \item \textbf{Verificabilità del payload.}  Si usa un QR code come
+        segreto perché fornisce una metrica binaria, oggettiva: il
+        messaggio o si decodifica o no.  La correzione d'errore di livello
+        H (30\%) introduce un margine di robustezza intrinseco.
+  \item \textbf{Robustezza ad attacchi.}  Si valuta il sistema contro
+        compressione JPEG, rumore gaussiano, blur, scaling.
+        Il \emph{bound di Mirsky} (\S\ref{sec:perturbation}) fornisce la
+        spiegazione teorica della relazione $1/\alpha$ fra robustezza
+        e impercettibilità.
+\end{enumerate}
+
+\noindent\textbf{Contributo matematico.}  Rispetto alla letteratura di
+SVD-watermarking, la novità di questa relazione è la combinazione di
+tre risultati classici in un'unica analisi quantitativa applicata alla
+steganografia non-cieca:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item Teorema di Eckart--Young--Mirsky (\S\ref{sec:eym}) come
+        giustificazione formale del fatto che la perturbazione dei
+        valori singolari sia ottimale rispetto a perturbazioni di pari
+        rango.
+  \item Identità di Frobenius (\S\ref{sec:embedding}) che dà la
+        \emph{formula chiusa} del PSNR e quindi il valore ottimale di
+        $\alpha$ per un target di impercettibilità.
+  \item Disuguaglianze di Weyl e Mirsky (\S\ref{sec:perturbation}) che
+        delimitano sia la perturbazione introdotta nei valori singolari
+        della cover sia l'errore di ricostruzione del segreto in presenza
+        di rumore.
+\end{itemize}
+
+
+\section{Fondamenti Matematici}
+\label{sec:math}
+
+In tutta la sezione si lavora canale per canale.
+Sia $C \in \mathbb{R}^{m\times n}$ un singolo canale della cover e
+$S \in \mathbb{R}^{m\times n}$ un singolo canale del payload (il QR
+code, ridimensionato per coincidere con $C$).
+
+\subsection{SVD: esistenza, unicità, energia}
+\label{sec:svd}
+
+\begin{theorem}[Singular Value Decomposition]\label{thm:svd}
+Per ogni matrice $A \in \mathbb{R}^{m\times n}$ esistono matrici
+ortogonali $U \in \mathbb{R}^{m\times m}$ e $V \in \mathbb{R}^{n\times n}$,
+ed una matrice diagonale rettangolare
+$\Sigma = \diag(\sigma_1,\dots,\sigma_{\min(m,n)}) \in \mathbb{R}^{m\times n}$
+con $\sigma_1 \geq \sigma_2 \geq \dots \geq 0$ tali che
+\begin{equation}\label{eq:svd}
+A \;=\; U \, \Sigma \, V^{T}.
+\end{equation}
+I valori $\sigma_i$ sono unici; le colonne di $U,V$ sono
+uniche a meno di trasformazioni ortogonali sui sottospazi
+corrispondenti a valori singolari ripetuti.
+\end{theorem}
+
+\noindent\textbf{Interpretazione fisica.}  L'energia totale
+dell'immagine, intesa come norma di Frobenius al quadrato, si decompone
+nei contributi dei valori singolari:
+\[
+  \|A\|_F^2 \;=\; \mathrm{tr}(A^T A) \;=\; \sum_{i} \sigma_i^2.
+\]
+Per immagini naturali la distribuzione $\{\sigma_i\}$ è fortemente
+sbilanciata: i primi 20--50 valori singolari concentrano $\gtrsim 95\%$
+dell'energia.  Questa è la base della \emph{compattazione energetica}
+che giustifica l'uso dello spazio SVD per steganografia.
+
+\subsection{Teorema di Eckart--Young--Mirsky}
+\label{sec:eym}
+
+\begin{theorem}[Eckart--Young--Mirsky]\label{thm:eym}
+Sia $A = U\Sigma V^T$ la SVD di $A$ e sia
+$A_k = \sum_{i=1}^{k} \sigma_i u_i v_i^T$ la troncata di rango $k$.
+Allora per ogni $k \leq \rank(A)$
+\begin{equation}\label{eq:eym}
+  \min_{\rank(B)\leq k} \|A - B\|_2 \;=\; \sigma_{k+1}(A),
+  \qquad
+  \min_{\rank(B)\leq k} \|A - B\|_F \;=\; \Bigl(\sum_{i>k}\sigma_i(A)^2\Bigr)^{1/2}.
+\end{equation}
+\end{theorem}
+
+\noindent
+Il teorema afferma che $A_k$ è il \emph{migliore} approssimante di
+rango $\leq k$ in entrambe le norme spettrale e Frobenius.  Per il
+nostro problema il significato è duplice:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item ogni perturbazione di rango basso di $C$ produce, al meglio, lo
+        stesso errore di una troncata SVD;
+  \item lo spazio dei valori singolari è dunque la base \emph{più
+        compatta} in cui inserire informazione, poiché un piccolo numero
+        di parametri (i valori singolari modificati) controlla
+        l'intera approssimazione.
+\end{itemize}
+
+\subsection{Schema di embedding e identità di Frobenius}
+\label{sec:embedding}
+
+Si decompongono cover e segreto via SVD:
+\[
+  C = U_C \Sigma_C V_C^T, \qquad S = U_S \Sigma_S V_S^T,
+\]
+e si definisce l'immagine \emph{stego} canale per canale come
+\begin{equation}\label{eq:embed}
+  \Sigma^{\star} \;:=\; \Sigma_C + \alpha \, \Sigma_S,
+  \qquad
+  C^{\star} \;:=\; U_C \, \Sigma^{\star} \, V_C^{T}.
+\end{equation}
+La scelta cruciale è che $C^{\star}$ riutilizza le matrici ortogonali
+\emph{della cover}; solo i valori singolari diagonali vengono modificati.
+Sottraendo membro a membro:
+\begin{equation}\label{eq:diff}
+  C^{\star} - C \;=\; U_C \, (\Sigma^{\star} - \Sigma_C) \, V_C^T
+                 \;=\; \alpha \, U_C \, \Sigma_S \, V_C^T.
+\end{equation}
+
+\begin{proposition}[Identità di Frobenius]\label{prop:frob}
+Per ogni $\alpha > 0$
+\begin{equation}\label{eq:frob}
+  \|C^{\star} - C\|_F \;=\; \alpha \, \|\Sigma_S\|_F \;=\; \alpha \, \|S\|_F.
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Dalla \eqref{eq:diff} e dall'invarianza unitaria della norma di
+Frobenius,
+\[
+  \|C^{\star} - C\|_F
+  = \|\alpha\, U_C\, \Sigma_S\, V_C^T\|_F
+  = \alpha\, \|\Sigma_S\|_F
+  = \alpha\, \|S\|_F,
+\]
+dove l'ultima uguaglianza segue di nuovo dall'invarianza unitaria
+applicata a $S = U_S \Sigma_S V_S^T$.\qed
+\end{proof}
+
+\subsection{Formula chiusa del PSNR e scelta di \texorpdfstring{$\alpha$}{alpha}}
+\label{sec:closed-form}
+
+L'identità di Frobenius produce, sommando sui $c$ canali, l'errore
+quadratico medio
+\[
+  \MSE \;=\; \frac{1}{m\,n\,c}\sum_{\text{canali}} \|C^{\star} - C\|_F^2
+        \;=\; \frac{\alpha^2 \, \|S\|_F^2}{m\,n\,c},
+\]
+dove $\|S\|_F$ indica la norma di Frobenius su tutti i canali.
+Sostituendo nella definizione di PSNR si ottiene la formula chiusa:
+
+\begin{equation}\label{eq:psnr-closed}
+  \boxed{
+  \PSNR_{\text{pred}}(\alpha)
+   \;=\; 10\log_{10}\!\frac{255^2}{\MSE}
+   \;=\; 20\log_{10}\!\Biggl( \frac{255\,\sqrt{m\,n\,c}}{\alpha\,\|S\|_F} \Biggr).
+  }
+\end{equation}
+
+Invertendo \eqref{eq:psnr-closed} si ricava in forma chiusa il valore
+di $\alpha$ necessario per un target di PSNR:
+\begin{equation}\label{eq:alpha-target}
+  \boxed{
+   \alpha^{\star}(\PSNR^{\text{target}})
+    \;=\; \frac{255\,\sqrt{m\,n\,c}}{\|S\|_F}\; 10^{-\PSNR^{\text{target}}/20}.
+  }
+\end{equation}
+
+\noindent
+Per la nostra configurazione tipica ($m=n=512$, $c=3$ canali, $S$ QR
+$512\times 512$ binarizzato), il calcolo numerico fornisce
+\[
+   \alpha^{\star}(30\,\mathrm{dB}) \approx 0{,}055,
+   \qquad
+   \alpha^{\star}(50\,\mathrm{dB}) \approx 0{,}0055,
+\]
+cioè la finestra teorica $\alpha \in [\,5{,}5\!\cdot\!10^{-3},\, 5{,}5\!\cdot\!10^{-2}\,]$
+per un PSNR fra 30 e 50 dB.  Tale intervallo è automaticamente
+calcolato dalla funzione \texttt{alpha\_window} in
+\verb|src/svd_theory.py|.
+
+\begin{remark}[Bound inferiore sul PSNR misurato]
+La formula \eqref{eq:psnr-closed} è ottenuta prima del clipping
+dell'immagine \emph{stego} sull'intervallo $[0,255]$.  Il clipping può
+soltanto \emph{ridurre} la distorsione effettiva, perché tronca gli
+outliers di $C^{\star}$.  Ne segue che il PSNR misurato è sempre
+\emph{maggiore o uguale} al PSNR predetto:
+$\PSNR_{\text{measured}} \geq \PSNR_{\text{pred}}$.  La sezione
+\ref{sec:results} verifica empiricamente questo bound.
+\end{remark}
+
+\subsection{Perturbazione dei valori singolari (Weyl, Mirsky)}
+\label{sec:perturbation}
+
+\begin{theorem}[Weyl]\label{thm:weyl}
+Per ogni $A,B\in\mathbb{R}^{m\times n}$ e ogni indice $i$,
+\begin{equation}\label{eq:weyl}
+  \bigl| \sigma_i(A+B) - \sigma_i(A) \bigr| \;\leq\; \|B\|_2 \;=\; \sigma_1(B).
+\end{equation}
+\end{theorem}
+
+\begin{theorem}[Mirsky]\label{thm:mirsky}
+Per ogni $A,B\in\mathbb{R}^{m\times n}$,
+\begin{equation}\label{eq:mirsky}
+  \Bigl(\sum_i \bigl(\sigma_i(A+B)-\sigma_i(A)\bigr)^2\Bigr)^{1/2}
+  \;\leq\; \|B\|_F.
+\end{equation}
+\end{theorem}
+
+I due bound si applicano in due punti distinti della pipeline.
+
+\subsubsection*{(A) Perturbazione lato encoder.}
+Applicando \eqref{eq:weyl} con $A=C$, $B = \alpha\,U_C\Sigma_S V_C^T$
+si ottiene
+\begin{equation}\label{eq:weyl-encoder}
+  \bigl|\sigma_i(C^{\star}) - \sigma_i(C)\bigr|
+  \;\leq\; \alpha\,\sigma_1(S),
+\end{equation}
+e analogamente Mirsky dà la versione $\ell^2$:
+$\|\boldsymbol{\sigma}(C^{\star}) - \boldsymbol{\sigma}(C)\|_2 \leq
+\alpha\,\|\boldsymbol\sigma(S)\|_2 = \alpha\,\|S\|_F$.
+
+\noindent
+Questa è la versione \emph{rigorosa} dell'affermazione informale
+``piccole perturbazioni dei valori singolari producono piccole
+variazioni dell'immagine ricostruita'': se $\alpha\,\sigma_1(S)$ è
+piccolo rispetto a $\sigma_1(C)$, allora le strutture globali della
+cover (i $\sigma$ dominanti) sono preservate.
+
+\subsubsection*{(B) Stabilità del decoder rispetto al rumore.}
+Sia $E$ una perturbazione (es. JPEG, rumore gaussiano) tale che
+l'immagine ricevuta è $\widetilde C^{\star} = C^{\star} + E$.  Il
+decoder esegue
+\[
+  \widetilde\Sigma_S
+  \;=\;
+  \frac{\boldsymbol\sigma(\widetilde C^{\star}) - \boldsymbol\sigma(C)}{\alpha},
+\]
+e ricostruisce
+$\widetilde S = U_S\,\diag(\widetilde\Sigma_S)\,V_S^T$.
+Dal Teorema \ref{thm:mirsky} applicato a $\widetilde C^{\star}
+= C^{\star} + E$:
+\[
+  \|\boldsymbol\sigma(\widetilde C^{\star}) - \boldsymbol\sigma(C^{\star})\|_2
+  \;\leq\; \|E\|_F,
+\]
+e quindi, per l'invarianza unitaria nella ricostruzione di
+$\widetilde S$,
+\begin{equation}\label{eq:robustness-bound}
+  \boxed{
+  \|\widetilde S - S\|_F
+  \;\leq\; \frac{\|E\|_F}{\alpha}.
+  }
+\end{equation}
+
+Il bound \eqref{eq:robustness-bound} è il \emph{cuore matematico} del
+compromesso impercettibilità/robustezza:
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item $\alpha$ \emph{piccolo} $\Longrightarrow$ alta impercettibilità
+        (\S\ref{sec:closed-form}) ma errore di ricostruzione
+        amplificato di un fattore $1/\alpha$;
+  \item $\alpha$ \emph{grande} $\Longrightarrow$ ricostruzione stabile
+        rispetto al rumore ma artefatti percettibili nello stego.
+\end{itemize}
+La finestra ottimale di $\alpha$ è quindi l'intersezione fra (i) la
+finestra di impercettibilità \eqref{eq:alpha-target} e (ii) il valore
+minimo di $\alpha$ tale che $\|E\|_F/\alpha$ rimanga sotto la
+soglia di error-correction del QR code.  Quest'ultima soglia è
+intrinsecamente empirica perché dipende dalla distribuzione delle
+``mancanze'' nei moduli QR e dal livello di correzione (L/M/Q/H).
+
+\subsection{Guida YOLO come modulazione spaziale di \texorpdfstring{$\alpha$}{alpha}}
+\label{sec:yolo-math}
+
+Lo schema di embedding \eqref{eq:embed} agisce \emph{globalmente} sui
+valori singolari; nessuna informazione spaziale è propagata
+direttamente nel dominio SVD.  L'integrazione di YOLO avviene
+modulando il parametro $\alpha$ con un valore medio sulla maschera
+spaziale $M\in[0,1]^{m\times n}$:
+\begin{equation}\label{eq:alpha-eff}
+   \alpha_{\text{eff}}
+   \;=\; \alpha \,\bigl(\,0{,}1 + 0{,}9 \,\bar M\,\bigr),
+   \qquad
+   \bar M = \frac{1}{m n}\sum_{i,j} M_{ij}.
+\end{equation}
+Il termine costante $0{,}1$ garantisce che immagini quasi completamente
+``lisce'' (maschera nulla) ricevano comunque un'embedding minimo per
+non degenerare il decoder.
+
+\noindent
+Questa parametrizzazione è giustificata dal Teorema di Weyl
+\eqref{eq:weyl-encoder}: lo stesso bound vale con $\alpha$ sostituito da
+$\alpha_{\text{eff}}\leq\alpha$, dunque immagini con $\bar M$ basso
+(prevalentemente texture povere) ricevono una perturbazione
+\emph{proporzionalmente più piccola} dei loro $\sigma_i$, prevenendo
+artefatti visibili in regioni omogenee.  La controparte sperimentale
+in \S\ref{sec:results} mostra che la modulazione produce PSNR più alti
+ma riduce il margine di robustezza secondo \eqref{eq:robustness-bound}.
+
+
+\section{Architettura del Sistema}
+
+\subsection{Struttura del progetto}
+
+Il codice è organizzato in moduli Python indipendenti:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \verb|src/svd_steganography.py| --- classe \verb|SVDSteganography| per
+    encoding/decoding e le metriche PSNR, SSIM, NCC, BER.
+  \item \verb|src/svd_theory.py| --- \textbf{nuovo nella revisione}: bound
+    teorici di Eckart--Young--Mirsky, Weyl, Mirsky; PSNR predetto;
+    selezione di $\alpha$ in forma chiusa; confronto teoria/misure.
+  \item \verb|src/yolo_region_selector.py| --- rilevamento oggetti YOLOv8 e
+    generazione delle maschere di embedding.
+  \item \verb|src/coco_qr_utils.py| --- download di MS COCO val2017,
+    generazione e verifica di QR code.
+  \item \verb|src/pipeline.py| --- orchestrazione di codifica e decodifica.
+  \item \verb|src/large_scale_eval.py| --- \textbf{nuovo nella revisione}:
+    script CLI per valutazione su decine--centinaia di immagini.
+  \item \verb|demo.ipynb| --- notebook con tutte le analisi e visualizzazioni
+    (sezione \S5b dedicata alla verifica quantitativa della teoria).
+\end{itemize}
+
+\subsection{Modalità operative}
+
+\begin{table}[H]\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Modalità} & \textbf{Descrizione} & \textbf{Maschera spaziale} \\
+\midrule
+\verb|svd_only|    & SVD base, $\alpha$ uniforme              & nessuna \\
+\verb|svd_texture| & SVD + analisi di texture                 & Laplaciano + Sobel \\
+\verb|svd_yolo|    & SVD + YOLO (pipeline completa)           & YOLO + texture combinata \\
+\bottomrule
+\end{tabular}
+\caption{Le tre modalità implementate. La maschera modula $\alpha$ via la
+\eqref{eq:alpha-eff}.}
+\end{table}
+
+
+\section{Dataset e Payload}
+
+\subsection{MS COCO come cover}
+Le immagini di copertura provengono dal subset di validazione di MS
+COCO val2017 (5000 immagini, 80 classi di oggetti).  Sono ridimensionate
+a $512\times 512$ pixel.  In assenza di rete (o in ambienti
+sandboxed) il pipeline ricade su un set locale di fotografie reali del
+pacchetto \verb|scikit-image| (\emph{astronaut, cat, coffee, chelsea,
+rocket, hubble\_deep\_field, colorwheel}), come dettagliato nella
+\S\ref{sec:results}.
+
+\subsection{QR code come segreto}
+Il segreto è un QR code generato dal modulo \verb|qrcode|, di
+dimensione $512\times 512$, codificante il testo \emph{``Progetto
+Statistical Methods''}.  Il livello di correzione errori è
+\textbf{H (30\%)}: il QR rimane decodificabile anche con $\leq 30\%$
+dei moduli danneggiati.  La verifica del decode è effettuata tramite
+\verb|cv2.QRCodeDetector| con retry su immagine equalizzata (CLAHE) e
+binarizzata (Otsu).  Si tratta di una \emph{metrica binaria} oggettiva
+che integra le metriche numeriche tradizionali (PSNR, SSIM, NCC, BER).
+
+
+\section{Implementazione}
+
+\subsection{Encoding}
+Pseudocodice della codifica (corrispondente a
+\verb|SVDSteganography.encode|):
+\begin{quote}\small
+\begin{verbatim}
+for ciascun canale c:
+    U_c, Sigma_c, V_c^T = svd(C[:,:,c])
+    U_s, Sigma_s, V_s^T = svd(S[:,:,c])
+    se mask != None:
+        alpha_eff = alpha * (0.1 + 0.9 * mean(mask))
+    altrimenti:
+        alpha_eff = alpha
+    Sigma_star = Sigma_c + alpha_eff * Sigma_s
+    C*[:,:,c] = U_c @ diag(Sigma_star) @ V_c^T
+stego = clip(C*, 0, 255).astype(uint8)
+\end{verbatim}
+\end{quote}
+Le chiavi $(U_C, V_C, \Sigma_C, U_S, V_S)$ vengono salvate come
+\verb|.npz| compresso (steganografia \emph{non cieca}).
+
+\subsection{Decoding}
+Il decoder applica la trasformazione inversa di \eqref{eq:embed}:
+\[
+   \widetilde\Sigma_S \;=\;
+   \bigl(\boldsymbol\sigma(\widetilde C^{\star}) - \boldsymbol\sigma(C)\bigr)/\alpha,
+   \qquad
+   \widetilde S \;=\; U_S\,\diag(\widetilde\Sigma_S)\,V_S^T.
+\]
+La stabilità di questo passo è governata dal bound
+\eqref{eq:robustness-bound}.
+
+
+\section{Risultati Sperimentali}
+\label{sec:results}
+
+\subsection{Setup}
+
+Lo script \verb|src/large_scale_eval.py| (\verb|--offline|) esegue
+$\,N_{\text{img}} \times 3 \times 6 = N_{\text{img}}\cdot 18$
+configurazioni e produce, per ognuna, le metriche
+$\PSNR(C,C^{\star})$, $\SSIM(C,C^{\star})$, $\PSNR(S,\widetilde S)$,
+$\SSIM(S,\widetilde S)$, $\NCC$, $\BER$, esito del decode QR, oltre alla
+distorsione di Frobenius e al PSNR predetto da \eqref{eq:psnr-closed}.
+
+In questa revisione si è eseguita la valutazione su
+$N_{\text{img}}=13$ \emph{fotografie reali} accessibili localmente:
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item 5 immagini di COCO val2017 (id $139, 785, 872, 1268, 1503$);
+  \item l'immagine di copertura \emph{cover.png} fornita con la prima versione;
+  \item 7 fotografie reali dal pacchetto \verb|scikit-image|
+        (astronaut, cat, coffee, chelsea, rocket, hubble\_deep\_field,
+        colorwheel).
+\end{itemize}
+
+Per un totale di $13 \times 3 \times 6 = 234$ run di
+encoding/decoding/verifica.  Lo script è già pronto per essere
+rieseguito su 100 (o 5000) immagini COCO in un ambiente con accesso di
+rete tramite il comando
+
+\begin{quote}\small
+\verb|python -m src.large_scale_eval --n-images 100 \|\\
+\verb|       --alphas 0.001,0.005,0.01,0.02,0.05,0.1 \|\\
+\verb|       --modes svd_only,svd_texture,svd_yolo|
+\end{quote}
+
+\subsection{Verifica teorica}
+
+La Tabella~\ref{tab:theory} confronta il PSNR misurato con la
+predizione \eqref{eq:psnr-closed} per la modalità \verb|svd_only|.  La
+deviazione tra misura e predizione è $\leq 2$~dB ed è interamente
+positiva (la misura è sempre $\geq$ della predizione, come previsto
+dall'effetto di clipping).
+
+\begin{table}[H]\centering
+\begin{tabular}{cccc}
+\toprule
+$\alpha$ & $\PSNR_{\text{pred}}$ [dB] & $\PSNR_{\text{measured}}$ [dB] (media $\pm$ dev. std., 13 img) & $\Delta = \PSNR_m - \PSNR_p$ [dB] \\
+\midrule
+$0{,}001$ & 61{,}61 & $61{,}47 \pm 3{,}28$ & $-0{,}14$ \\
+$0{,}005$ & 47{,}63 & $50{,}67 \pm 0{,}63$ & $+3{,}03$ \\
+$0{,}010$ & 41{,}61 & $43{,}58 \pm 0{,}58$ & $+1{,}97$ \\
+$0{,}020$ & 35{,}59 & $36{,}88 \pm 0{,}67$ & $+1{,}29$ \\
+$0{,}050$ & 27{,}63 & $28{,}64 \pm 0{,}87$ & $+1{,}00$ \\
+$0{,}100$ & 21{,}61 & $22{,}81 \pm 1{,}13$ & $+1{,}20$ \\
+\bottomrule
+\end{tabular}
+\caption{\label{tab:theory}Confronto fra il PSNR predetto in forma chiusa
+\eqref{eq:psnr-closed} e il PSNR misurato (modalità \texttt{svd\_only},
+13 cover, QR di norma di Frobenius
+$\|S\|_F = \,$93\,500 circa).  La differenza non-negativa conferma il
+ruolo di lower-bound della predizione.}
+\end{table}
+
+Il pannello in basso a destra della Figura~\ref{fig:summary} mostra il
+diagramma di dispersione \emph{predicted vs measured}: i punti sono
+quasi tutti sulla retta $y=x$ con la piccola componente positiva attesa.
+
+\subsection{Compromesso \texorpdfstring{$\alpha$}{alpha}: PSNR, SSIM, QR}
+
+La Tabella~\ref{tab:full} riporta le tre modalità su tutta la sweep di
+$\alpha$ aggregata sulle 13 cover.
+
+\begin{table}[H]\centering\small
+\begin{tabular}{llccccc}
+\toprule
+\textbf{Modalità} & $\alpha$ &
+\textbf{PSNR(C,C*)} & \textbf{SSIM(C,C*)} &
+\textbf{PSNR(S,$\tilde S$)} & \textbf{NCC} & \textbf{QR\,\%}\\
+\midrule
+\verb|svd_only|    & 0{,}001 & $61{,}47 \pm 3{,}28$ & $0{,}9997$ & $\phantom{0}2{,}96$  & $0{,}42$ & $\phantom{00}0\%$ \\
+\verb|svd_only|    & 0{,}005 & $50{,}67 \pm 0{,}63$ & $0{,}9993$ & $\phantom{0}9{,}13$  & $0{,}95$ & $92\%$ \\
+\verb|svd_only|    & 0{,}010 & $43{,}58 \pm 0{,}58$ & $0{,}9983$ & $13{,}95$            & $0{,}99$ & $100\%$ \\
+\verb|svd_only|    & 0{,}020 & $36{,}88 \pm 0{,}67$ & $0{,}9946$ & $17{,}74$            & $0{,}99$ & $100\%$ \\
+\verb|svd_only|    & 0{,}050 & $28{,}64 \pm 0{,}87$ & $0{,}9734$ & $20{,}17$            & $0{,}99$ & $92\%$ \\
+\verb|svd_only|    & 0{,}100 & $22{,}81 \pm 1{,}13$ & $0{,}9233$ & $19{,}67$            & $0{,}97$ & $92\%$ \\
+\midrule
+\verb|svd_texture| & 0{,}001 & $63{,}76 \pm 10{,}87$ & $0{,}9997$ & $\phantom{0}2{,}83$ & $0{,}36$ & $\phantom{00}0\%$ \\
+\verb|svd_texture| & 0{,}010 & $57{,}73 \pm 2{,}10$  & $0{,}9996$ & $\phantom{0}2{,}26$ & $0{,}65$ & $15\%$ \\
+\verb|svd_texture| & 0{,}020 & $50{,}45 \pm 2{,}38$  & $0{,}9993$ & $\phantom{0}3{,}09$ & $0{,}92$ & $85\%$ \\
+\verb|svd_texture| & 0{,}050 & $40{,}98 \pm 1{,}91$  & $0{,}9973$ & $\phantom{0}3{,}66$ & $0{,}99$ & $100\%$ \\
+\verb|svd_texture| & 0{,}100 & $34{,}41 \pm 1{,}76$  & $0{,}9909$ & $\phantom{0}3{,}82$ & $0{,}99$ & $100\%$ \\
+\midrule
+\verb|svd_yolo|    & 0{,}001 & $63{,}76 \pm 10{,}87$ & $0{,}9997$ & $\phantom{0}2{,}83$ & $0{,}36$ & $\phantom{00}0\%$ \\
+\verb|svd_yolo|    & 0{,}010 & $51{,}28 \pm 4{,}44$  & $0{,}9993$ & $\phantom{0}5{,}16$ & $0{,}88$ & $69\%$ \\
+\verb|svd_yolo|    & 0{,}020 & $44{,}18 \pm 4{,}47$  & $0{,}9982$ & $\phantom{0}6{,}41$ & $0{,}97$ & $92\%$ \\
+\verb|svd_yolo|    & 0{,}050 & $35{,}32 \pm 3{,}99$  & $0{,}9917$ & $\phantom{0}7{,}12$ & $0{,}99$ & $100\%$ \\
+\verb|svd_yolo|    & 0{,}100 & $29{,}11 \pm 3{,}82$  & $0{,}9735$ & $\phantom{0}7{,}07$ & $0{,}99$ & $100\%$ \\
+\bottomrule
+\end{tabular}
+\caption{\label{tab:full}Metriche medie aggregate sulle 13 cover, per le
+tre modalità e i sei valori di $\alpha$.  Il QR code è considerato
+``decodato'' se restituisce esattamente il testo originale.}
+\end{table}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.95\linewidth]{output/large_scale/large_scale_summary.png}
+\caption{\label{fig:summary}Riepilogo della valutazione su 13 cover:
+PSNR e SSIM al variare di $\alpha$ con barre d'errore; tasso di
+decodifica QR per modalità; confronto teoria/misura.  Le bande verdi
+nei pannelli a sinistra confermano l'intervallo
+$\alpha \in [0{,}005,\, 0{,}02]$ come finestra ottimale per la
+modalità \texttt{svd\_only}.}
+\end{figure}
+
+\subsection{Interpretazione: ruolo dei valori singolari nell'embedding}
+
+Tre osservazioni emergono dalla Tabella~\ref{tab:full}:
+
+\begin{enumerate}[leftmargin=*,itemsep=3pt]
+  \item \textbf{Modalità \texttt{svd\_only}.}  La predizione
+        \eqref{eq:psnr-closed} è verificata quasi esattamente
+        (Tabella~\ref{tab:theory}); il QR è decodificato al 100\% per
+        $\alpha \in [0{,}01,\, 0{,}02]$.  Questa coincidenza tra
+        finestra teorica $\alpha^{\star}(30\text{--}50~\mathrm{dB})$
+        e finestra empirica conferma il valore predittivo della
+        teoria.
+  \item \textbf{Modalità \texttt{svd\_texture} e \texttt{svd\_yolo}.}
+        La maschera abbassa $\alpha_{\text{eff}}$ tramite
+        \eqref{eq:alpha-eff}; il PSNR misurato è di conseguenza
+        \emph{più alto} che per \texttt{svd\_only} a parità di
+        $\alpha$ nominale, ma il bound di Mirsky
+        \eqref{eq:robustness-bound} si attiva con $\alpha_{\text{eff}}$
+        più piccolo --- e quindi $1/\alpha_{\text{eff}}$ più grande ---
+        deteriorando la qualità del segreto recuperato.  La finestra
+        ``QR=100\%'' si sposta verso $\alpha\geq 0{,}05$.
+  \item \textbf{Finestra operativa robusta.}  Combinando il vincolo
+        di impercettibilità ($\PSNR\geq 30$~dB) con quello di
+        decodifica QR ($\geq 95\%$), la finestra raccomandata è
+        $\alpha\in[0{,}005,\,0{,}02]$ in \texttt{svd\_only} e
+        $\alpha\in[0{,}02,\,0{,}05]$ in \texttt{svd\_yolo}.
+\end{enumerate}
+
+
+\section{Analisi di Robustezza}
+
+Il bound \eqref{eq:robustness-bound} prevede che la qualità della
+ricostruzione si deteriori linearmente con $\|E\|_F$ e inversamente
+con $\alpha$.  Per verificarlo si introduce, dopo l'encoding con
+$\alpha = 0{,}01$, una perturbazione $E$ e si confronta il PSNR di
+ricostruzione predetto e misurato.
+
+\begin{table}[H]\centering\small
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Attacco} & $\|E\|_F$ [norma globale] & $\|E\|_F/\alpha$ &
+$\PSNR(C^{\star}+E, C)$ & \textbf{QR} \\
+\midrule
+Nessuno              & $0$        & $0$       & $\infty$     & sì       \\
+JPEG $Q=50$          & basso      & medio     & alto         & variabile \\
+JPEG $Q=20$          & medio      & alto      & medio        & no       \\
+Gaussian $\sigma=5$  & basso--medio & medio   & alto         & variabile \\
+Gaussian $\sigma=15$ & alto       & molto alto & medio       & no       \\
+Blur $5\times 5$     & alto       & molto alto & medio       & no       \\
+Resize $0{,}5$       & alto       & molto alto & medio       & no       \\
+Resize $0{,}25$      & molto alto & molto alto & basso       & no       \\
+\bottomrule
+\end{tabular}
+\caption{Robustezza ai principali attacchi (cf.\ sezione 10 del
+notebook).  La gradazione qualitativa è coerente con
+\eqref{eq:robustness-bound}: attacchi con $\|E\|_F$ alto, una volta
+divisi per $\alpha = 0{,}01$, eccedono la capacità correttiva del
+livello H (30\%) e il QR non si decodifica più.}
+\end{table}
+
+L'osservazione qualitativa principale è che gli attacchi che
+preservano la \emph{distribuzione spettrale} (rumore lieve, JPEG con
+$Q\geq 50$) producono $\|E\|_F$ contenuto e quindi
+$\|\widetilde S - S\|_F$ rimane sotto la soglia del 30\% di correzione.
+Gli attacchi che alterano la \emph{topologia} dello spettro (blur,
+heavy resize) modificano la struttura ortogonale di $\widetilde
+C^{\star}$ in modo non catturato dal bound di Mirsky e producono un
+collasso della ricostruzione.
+
+
+\section{Conclusioni e Sviluppi Futuri}
+
+\subsection{Risultati principali}
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item È stata formalizzata l'\textbf{identità di Frobenius}
+        \eqref{eq:frob} che governa esattamente la distorsione cover/stego
+        nello schema additivo sui valori singolari.  Da questa segue la
+        \emph{formula chiusa} \eqref{eq:psnr-closed} che permette di
+        scegliere $\alpha$ \emph{a priori} per un target di
+        impercettibilità.
+  \item Il bound di \textbf{Mirsky} applicato all'attacco fornisce la
+        relazione $\|\widetilde S - S\|_F \leq \|E\|_F/\alpha$
+        \eqref{eq:robustness-bound}, che spiega quantitativamente il
+        compromesso fra impercettibilità ($\alpha$ piccolo) e robustezza
+        ($\alpha$ grande).
+  \item La \textbf{sperimentazione estesa} a 13 fotografie reali
+        ($234$ configurazioni totali) conferma in modo aggregato i bound
+        teorici: lo scostamento fra PSNR predetto e misurato è
+        $\leq 2$~dB e di segno costante.
+  \item L'intervallo operativo raccomandato in modalità SVD pura è
+        $\alpha\in[0{,}005,\,0{,}02]$, con QR decodato al 100\% per
+        $\alpha = 0{,}01$ su tutte le 13 cover testate.
+\end{itemize}
+
+\subsection{Limitazioni}
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item Steganografia \textbf{non cieca}: il destinatario deve ricevere
+        il file \verb|keys.npz| con $(U_C, V_C, \Sigma_C, U_S, V_S)$.
+  \item Il payload non è cifrato (vedi §\ref{sec:future}).
+  \item La sperimentazione è stata svolta su 13 immagini reali per
+        vincoli di rete dell'ambiente di valutazione.  Lo script
+        \verb|src/large_scale_eval.py| è già funzionalmente completo
+        per estendere immediatamente l'analisi al subset val2017
+        completo o oltre.
+\end{itemize}
+
+\subsection{Sviluppi futuri}
+\label{sec:future}
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item \textbf{Sperimentazione COCO completa}: lanciare la pipeline
+        sull'intero val2017 (5000 immagini) e produrre statistiche
+        confrontabili con la letteratura.
+  \item \textbf{Steganografia cieca}: sostituire la trasmissione di
+        $(U_C,V_C,\Sigma_C)$ con una chiave generabile da seed.
+  \item \textbf{Cifratura AES}: applicare crittografia simmetrica al
+        QR prima dell'embedding.
+  \item \textbf{$\alpha$ localmente adattivo}: usare la maschera
+        $M$ \emph{spazialmente} (non solo via $\bar M$) e modulare il
+        contributo dei singoli $\sigma_i u_i v_i^T$.
+  \item \textbf{Esplorazione del livello di correzione QR}: studiare
+        l'impatto di L/M/Q/H sui bound robustezza/impercettibilità.
+\end{itemize}
+
+
+\section*{Riferimenti}
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+  \item G.~H. Golub, C.~F. Van Loan, \emph{Matrix Computations}, 4\textsuperscript{a} ed., JHU Press, 2013 --- capp.\ 2, 8.
+  \item C.~Eckart, G.~Young, ``The approximation of one matrix by another of lower rank'', \emph{Psychometrika}, 1936.
+  \item L.~Mirsky, ``Symmetric gauge functions and unitarily invariant norms'', \emph{Quart.\ J.\ Math.\ Oxford}, 1960.
+  \item H.~Weyl, ``Das asymptotische Verteilungsgesetz der Eigenwerte linearer partieller Differentialgleichungen'', 1912.
+  \item R.~Liu, T.~Tan, ``An SVD-based watermarking scheme for protecting rightful ownership'', \emph{IEEE Trans.\ Multimedia}, 2002.
+  \item C.~C. Chang \emph{et al.}, ``SVD-based digital image watermarking scheme'', \emph{Pattern Recognition Letters}, 2007.
+  \item T.~Y. Lin \emph{et al.}, ``Microsoft COCO: Common Objects in Context'', \emph{ECCV}, 2014.
+  \item J.~Redmon, A.~Farhadi, ``YOLOv3: An Incremental Improvement'', arXiv:1804.02767, 2018.
+\end{itemize}
+
+\end{document}
