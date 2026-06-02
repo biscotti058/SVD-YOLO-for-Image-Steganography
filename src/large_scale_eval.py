@@ -119,24 +119,35 @@ def coco_image_ids(n_images: int) -> List[int]:
 
 
 def download_one(image_id: int, save_dir: str,
-                 target_size=(512, 512)) -> str:
-    """Download a single COCO val2017 image. Returns local path or ''."""
+                 target_size=(512, 512),
+                 retries: int = 3,
+                 timeout: int = 30) -> str:
+    """Download a single COCO val2017 image with retries. Returns local path or ''."""
     os.makedirs(save_dir, exist_ok=True)
     filename = f"coco_{image_id:012d}.png"
     path = os.path.join(save_dir, filename)
     if os.path.exists(path):
         return path
     url = f"http://images.cocodataset.org/val2017/{image_id:012d}.jpg"
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            img = Image.open(io.BytesIO(r.read())).convert("RGB")
-        if target_size is not None:
-            img = img.resize(target_size, Image.LANCZOS)
-        img.save(path)
-        return path
-    except Exception as e:  # network failure, 404, etc.
-        print(f"  [warn] failed to download {image_id}: {e}")
-        return ""
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (compatible; SVDStego/1.0)"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                img = Image.open(io.BytesIO(r.read())).convert("RGB")
+            if target_size is not None:
+                img = img.resize(target_size, Image.LANCZOS)
+            img.save(path)
+            return path
+        except Exception as e:
+            last_err = e
+            # Exponential backoff: 1s, 2s, 4s
+            if attempt < retries:
+                time.sleep(2 ** (attempt - 1))
+    print(f"  [warn] failed to download {image_id} after {retries} attempts: {last_err}")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +174,11 @@ def evaluate_configuration(cover: np.ndarray,
     recovered = stego_engine.decode(stego)
 
     secret_resized = stego_engine._resize_secret(cover, secret)
+    # The encoder may have used an effective alpha smaller than the nominal
+    # one when a mask was supplied; record both so the theoretical analysis
+    # can use the actually-embedded strength.
+    alpha_eff = stego_engine._effective_alpha
+    mask_mean = float(np.mean(mask)) if mask is not None else 1.0
 
     psnr = compute_psnr(cover, stego)
     ssim = compute_ssim(cover, stego)
@@ -173,11 +189,16 @@ def evaluate_configuration(cover: np.ndarray,
     qr_text = verify_qr_decode(recovered)
     qr_ok = qr_text is not None
 
-    theory = compare_predicted_measured(cover, secret_resized, stego, alpha)
+    # The Frobenius identity is exact w.r.t. the *effective* alpha, so we
+    # feed alpha_eff to the closed-form prediction. The result is the
+    # value the theory genuinely predicts for the masked embedding.
+    theory = compare_predicted_measured(cover, secret_resized, stego, alpha_eff)
 
     return {
         "mode": mode,
         "alpha": alpha,
+        "alpha_eff": alpha_eff,
+        "mask_mean": mask_mean,
         "psnr": psnr,
         "ssim": ssim,
         "rec_psnr": rec_psnr,
@@ -218,14 +239,18 @@ def run(n_images: int = 100,
             print(f"  [warn] YOLO unavailable ({e}); falling back to texture mode")
             modes = [m if m != "svd_yolo" else "svd_texture" for m in modes]
 
-    ids = coco_image_ids(n_images)
-    print(f"Evaluating on {len(ids)} COCO val2017 images, "
-          f"modes={list(modes)}, alphas={list(alphas)}")
-    print(f"Total runs: {len(ids) * len(modes) * len(alphas)}")
+    # We want exactly `n_images` *successfully processed* covers.  COCO
+    # downloads may occasionally fail (HTTP 404 for purged ids, transient
+    # network errors), so we draw from a longer pool than n_images and stop
+    # only when n_ok reaches the target.
+    pool = coco_image_ids(max(n_images * 2, n_images + 50))
+    print(f"Target: {n_images} COCO val2017 images successfully processed.")
+    print(f"Pool of candidate ids: {len(pool)} (will be consumed until target reached).")
+    print(f"Modes={list(modes)}, alphas={list(alphas)}")
 
     csv_path = os.path.join(out_dir, "metrics.csv")
     fieldnames = [
-        "image_id", "image_path", "mode", "alpha",
+        "image_id", "image_path", "mode", "alpha", "alpha_eff", "mask_mean",
         "psnr", "ssim",
         "rec_psnr", "rec_ssim", "ncc", "ber", "qr_decoded",
         "frob_predicted", "frob_measured",
@@ -237,7 +262,9 @@ def run(n_images: int = 100,
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for idx, image_id in enumerate(ids, 1):
+        for idx_pool, image_id in enumerate(pool, 1):
+            if n_ok >= n_images:
+                break
             path = download_one(image_id, images_dir, target_size=target_size)
             if not path:
                 n_fail += 1
@@ -267,11 +294,16 @@ def run(n_images: int = 100,
             n_ok += 1
             elapsed = time.time() - t0
             rate = n_ok / max(elapsed, 1e-6)
-            eta = (len(ids) - idx) / max(rate, 1e-6)
-            print(f"  [{idx:3d}/{len(ids)}] image {image_id} OK "
-                  f"({elapsed:.1f}s elapsed, ETA {eta:.0f}s)")
+            eta = (n_images - n_ok) / max(rate, 1e-6)
+            print(f"  [{n_ok:3d}/{n_images}] image {image_id} OK "
+                  f"(pool {idx_pool}/{len(pool)}, {elapsed:.1f}s elapsed, "
+                  f"ETA {eta:.0f}s)")
 
-    print(f"\nDone. {n_ok} images processed, {n_fail} skipped. "
+    if n_ok < n_images:
+        print(f"\n[warn] only {n_ok}/{n_images} images successfully processed "
+              f"(pool exhausted, {n_fail} downloads failed). Consider rerunning "
+              "with a wider pool or checking network access.")
+    print(f"\nDone. {n_ok} images processed, {n_fail} ids skipped. "
           f"Total time: {time.time() - t0:.1f}s")
     print(f"Per-image metrics saved to: {csv_path}")
 
@@ -301,7 +333,7 @@ def aggregate(csv_path: str, out_dir: str) -> str:
 
     agg_path = os.path.join(out_dir, "aggregate.csv")
     cols = [
-        "mode", "alpha", "n_images",
+        "mode", "alpha", "alpha_eff_mean", "mask_mean_mean", "n_images",
         "psnr_mean", "psnr_std",
         "ssim_mean", "ssim_std",
         "rec_psnr_mean", "rec_psnr_std",
@@ -315,8 +347,14 @@ def aggregate(csv_path: str, out_dir: str) -> str:
         writer.writeheader()
         for (mode, alpha), grp in sorted(groups.items(),
                                          key=lambda kv: (kv[0][0], kv[0][1])):
-            def col(name):
-                return np.array([float(r[name]) for r in grp], dtype=np.float64)
+            def col(name, default=None):
+                vals = []
+                for r in grp:
+                    if name in r and r[name] != "":
+                        vals.append(float(r[name]))
+                    elif default is not None:
+                        vals.append(default)
+                return np.array(vals, dtype=np.float64) if vals else np.array([], dtype=np.float64)
             psnr = col("psnr")
             ssim = col("ssim")
             rpsnr = col("rec_psnr")
@@ -324,9 +362,13 @@ def aggregate(csv_path: str, out_dir: str) -> str:
             ber = col("ber")
             qr = col("qr_decoded")
             pred = col("psnr_predicted")
+            a_eff = col("alpha_eff", default=alpha)
+            mask_mean = col("mask_mean", default=1.0)
             writer.writerow({
                 "mode": mode,
                 "alpha": alpha,
+                "alpha_eff_mean": float(np.mean(a_eff)) if a_eff.size else alpha,
+                "mask_mean_mean": float(np.mean(mask_mean)) if mask_mean.size else 1.0,
                 "n_images": len(grp),
                 "psnr_mean": np.mean(psnr),
                 "psnr_std": np.std(psnr),

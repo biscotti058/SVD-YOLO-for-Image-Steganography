@@ -1,6 +1,15 @@
 __pycache__/
 *.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# LaTeX build artefacts
 *.aux
 *.log
 *.out
 *.toc
+*.synctex.gz
+
+# Anaconda project metadata
+anaconda_projects/

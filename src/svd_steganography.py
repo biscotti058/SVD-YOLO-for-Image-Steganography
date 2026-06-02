@@ -19,6 +19,11 @@ class SVDSteganography:
         self._secret_shape = None
         self._u_secret = None
         self._vt_secret = None
+        # Effective embedding strength actually used at encode time.
+        # When no mask is supplied this equals self.alpha; with a mask
+        # it equals alpha * (0.1 + 0.9 * mean(mask)).  The decoder MUST
+        # divide by this value to invert the embedding exactly.
+        self._effective_alpha = None
 
     def _resize_secret(self, cover, secret):
         from PIL import Image as PILImage
@@ -45,6 +50,12 @@ class SVDSteganography:
         self._s_cover = []
         self._u_secret = []
         self._vt_secret = []
+        if mask is not None:
+            mask_ratio = float(np.mean(mask))
+            effective_alpha = self.alpha * (0.1 + 0.9 * mask_ratio)
+        else:
+            effective_alpha = self.alpha
+        self._effective_alpha = effective_alpha
         for ch in range(c):
             U_c, S_c, Vt_c = np.linalg.svd(cover[:, :, ch], full_matrices=False)
             U_s, S_s, Vt_s = np.linalg.svd(secret[:, :, ch], full_matrices=False)
@@ -53,11 +64,6 @@ class SVDSteganography:
             self._s_cover.append(S_c.copy())
             self._u_secret.append(U_s)
             self._vt_secret.append(Vt_s)
-            if mask is not None:
-                mask_ratio = np.mean(mask)
-                effective_alpha = self.alpha * (0.1 + 0.9 * mask_ratio)
-            else:
-                effective_alpha = self.alpha
             S_stego = S_c + effective_alpha * S_s
             stego[:, :, ch] = U_c @ np.diag(S_stego) @ Vt_c
         stego = np.clip(stego, 0, 255).astype(np.uint8)
@@ -66,12 +72,19 @@ class SVDSteganography:
     def decode(self, stego_img):
         if self._u_cover is None:
             raise ValueError("Must call encode() before decode(), or load keys.")
+        # The decoder must invert the encoder exactly: the encoder used
+        # `_effective_alpha` (which equals `alpha` only when no mask is
+        # supplied), so we must divide by the same scalar here.  Falling
+        # back to `self.alpha` preserves backward compatibility with keys
+        # saved by older versions of this module.
+        alpha_eff = (self._effective_alpha
+                     if self._effective_alpha is not None else self.alpha)
         stego = self._ensure_3channel(stego_img).astype(np.float64)
         h, w, c = stego.shape
         secret_recovered = np.zeros_like(stego)
         for ch in range(c):
             U_st, S_st, Vt_st = np.linalg.svd(stego[:, :, ch], full_matrices=False)
-            S_secret_recovered = (S_st - self._s_cover[ch]) / self.alpha
+            S_secret_recovered = (S_st - self._s_cover[ch]) / alpha_eff
             secret_recovered[:, :, ch] = (
                 self._u_secret[ch] @ np.diag(S_secret_recovered) @ self._vt_secret[ch]
             )
@@ -81,9 +94,13 @@ class SVDSteganography:
     def save_keys(self, filepath):
         if self._u_cover is None:
             raise ValueError("No keys to save. Run encode() first.")
+        # Persist `effective_alpha` so a decoder loading these keys can
+        # invert the embedding exactly even when a mask was used.
         np.savez_compressed(
             filepath,
             alpha=self.alpha,
+            effective_alpha=(self._effective_alpha
+                             if self._effective_alpha is not None else self.alpha),
             secret_shape=self._secret_shape,
             u_cover_0=self._u_cover[0], u_cover_1=self._u_cover[1], u_cover_2=self._u_cover[2],
             vt_cover_0=self._vt_cover[0], vt_cover_1=self._vt_cover[1], vt_cover_2=self._vt_cover[2],
@@ -95,6 +112,11 @@ class SVDSteganography:
     def load_keys(self, filepath):
         data = np.load(filepath)
         self.alpha = float(data['alpha'])
+        # Backward compatibility: older keys lack effective_alpha; default to alpha.
+        if 'effective_alpha' in data.files:
+            self._effective_alpha = float(data['effective_alpha'])
+        else:
+            self._effective_alpha = self.alpha
         self._secret_shape = tuple(data['secret_shape'])
         self._u_cover = [data['u_cover_0'], data['u_cover_1'], data['u_cover_2']]
         self._vt_cover = [data['vt_cover_0'], data['vt_cover_1'], data['vt_cover_2']]
