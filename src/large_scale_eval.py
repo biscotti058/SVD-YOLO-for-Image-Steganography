@@ -1,20 +1,21 @@
 """
-Large-scale evaluation of the SVD + YOLO steganography pipeline.
+Large-scale evaluation of the SVD + YOLO steganography pipeline on
+MS COCO val2017.
 
-Runs the encoder / decoder on a large batch of COCO val2017 images for
-multiple values of α and for every operating mode (svd_only, svd_texture,
-svd_yolo).  For each (image, mode, α) triple it records the following
-metrics:
+Runs the encoder / decoder on a configurable number of COCO val2017
+images (default: 100) for every value of α and every operating mode
+(svd_only, svd_texture, svd_yolo) requested.  For each
+(image, mode, α) triple it records the following metrics:
 
     * embedding side: PSNR(cover, stego), SSIM(cover, stego),
       Frobenius distortion, theoretical PSNR prediction;
     * recovery side: PSNR(secret, recovered), SSIM(secret, recovered),
       NCC, BER, QR decode success.
 
-Outputs (under output/large_scale/):
-    metrics.csv      — one row per (image, mode, α) configuration
-    aggregate.csv    — mean / std / QR success rate per (mode, α)
-    large_scale_summary.png — summary plots
+Outputs (under `output/large_scale/`):
+    metrics.csv               — one row per (image, mode, α) configuration
+    aggregate.csv             — mean / std / QR success rate per (mode, α)
+    large_scale_summary.png   — summary plots
 
 This is the script that the professor's review explicitly asked for:
 "E' necessario inoltre estendere la sperimentazione a un numero molto
@@ -23,9 +24,19 @@ maggiore di immagini."
 Usage
 -----
 
+    # full study on 100 COCO images, all modes, all alphas
+    python -m src.large_scale_eval
+
+    # custom sweep
     python -m src.large_scale_eval --n-images 100 \\
         --alphas 0.001,0.005,0.01,0.02,0.05,0.1 \\
         --modes svd_only,svd_texture,svd_yolo
+
+Requirements
+------------
+The script needs HTTP access to `images.cocodataset.org` to download the
+val2017 images on the first run.  Once cached under `images/`, further
+runs are offline.
 
 """
 
@@ -34,18 +45,16 @@ from __future__ import annotations
 import argparse
 import csv
 import io
-import json
 import os
 import sys
 import time
 import urllib.request
-from typing import Dict, List, Sequence
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 from PIL import Image
 
-# Make `src.*` importable when the script is launched as
-# `python -m src.large_scale_eval` from the project root.
+# Make `src.*` importable when launched as `python -m src.large_scale_eval`.
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(HERE)
 if PROJECT_ROOT not in sys.path:
@@ -58,125 +67,55 @@ from src.svd_steganography import (
     compute_ncc,
     compute_ber,
     load_image,
-    save_image,
 )
 from src.yolo_region_selector import YOLORegionSelector, generate_texture_only_mask
 from src.coco_qr_utils import generate_qr_secret, verify_qr_decode
-from src.svd_theory import (
-    secret_frobenius_norm,
-    predicted_psnr,
-    compare_predicted_measured,
-)
+from src.svd_theory import compare_predicted_measured
 
 
 # ---------------------------------------------------------------------------
-# COCO id enumeration
+# COCO val2017 id enumeration
 # ---------------------------------------------------------------------------
+# Deterministic list of 200 image ids drawn from MS COCO val2017.  Using a
+# fixed list (rather than a random sample) makes runs of the script
+# reproducible: re-running with --n-images 50 / 100 / 200 always picks the
+# same set of images so that aggregated metrics are directly comparable.
 
-# A deterministic list of COCO val2017 image ids.  The first ~5000 ids are
-# enough for the full COCO val2017 subset; we use a deterministic stride so
-# that running the script with --n-images 30 / 100 / 500 always picks the
-# same set of images and the results are reproducible.
-COCO_KNOWN_IDS: List[int] = [
-    139, 285, 632, 724, 785, 802, 872, 885, 1000, 1268, 1296, 1353, 1425,
-    1490, 1503, 1532, 1584, 1675, 1761, 1818, 1993, 2006, 2149, 2153, 2261,
-    2299, 2431, 2473, 2532, 2587, 2685, 2923, 3092, 3156, 3255, 3501, 3553,
-    3845, 3934, 4134, 4395, 4495, 4765, 4795, 4944, 5037, 5193, 5477, 5503,
-    5586, 5802, 5992, 6040, 6213, 6471, 6614, 6763, 6818, 6894, 7088, 7108,
-    7281, 7386, 7574, 7888, 7977, 8021, 8211, 8277, 8532, 8629, 8762, 8844,
-    9378, 9400, 9448, 9483, 9590, 9772, 9891, 9914, 10092, 10363, 10434,
-    10583, 10707, 10764, 10977, 11051, 11122, 11197, 11295, 11511, 11615,
-    11760, 11813, 11888, 11987, 12062, 12120, 12280, 12448, 12576, 12639,
-    12748, 12827, 12993, 13004, 13177, 13291, 13348, 13546, 13659, 13774,
-    13923, 14007, 14226, 14380, 14439, 14573, 14831, 14888, 15079, 15278,
-    15335, 15440, 15517, 15660, 15746, 15877, 15956, 16010, 16228, 16439,
-    16502, 16598, 16668, 16859, 17029, 17115, 17207, 17379, 17436, 17627,
-    17714, 17899, 17905, 18193, 18380, 18491, 18737, 18837, 19042, 19221,
-    19402, 19432, 19543, 19712, 19924,
+COCO_VAL2017_IDS: List[int] = [
+    139, 285, 632, 724, 785, 802, 872, 885, 1000, 1268,
+    1296, 1353, 1425, 1490, 1503, 1532, 1584, 1675, 1761, 1818,
+    1993, 2006, 2149, 2153, 2261, 2299, 2431, 2473, 2532, 2587,
+    2685, 2923, 3092, 3156, 3255, 3501, 3553, 3845, 3934, 4134,
+    4395, 4495, 4765, 4795, 4944, 5037, 5193, 5477, 5503, 5586,
+    5802, 5992, 6040, 6213, 6471, 6614, 6763, 6818, 6894, 7088,
+    7108, 7281, 7386, 7574, 7888, 7977, 8021, 8211, 8277, 8532,
+    8629, 8762, 8844, 9378, 9400, 9448, 9483, 9590, 9772, 9891,
+    9914, 10092, 10363, 10434, 10583, 10707, 10764, 10977, 11051, 11122,
+    11197, 11295, 11511, 11615, 11760, 11813, 11888, 11987, 12062, 12120,
+    12280, 12448, 12576, 12639, 12748, 12827, 12993, 13004, 13177, 13291,
+    13348, 13546, 13659, 13774, 13923, 14007, 14226, 14380, 14439, 14573,
+    14831, 14888, 15079, 15278, 15335, 15440, 15517, 15660, 15746, 15877,
+    15956, 16010, 16228, 16439, 16502, 16598, 16668, 16859, 17029, 17115,
+    17207, 17379, 17436, 17627, 17714, 17899, 17905, 18193, 18380, 18491,
+    18737, 18837, 19042, 19221, 19402, 19432, 19543, 19712, 19924, 20059,
+    20247, 20333, 20428, 20553, 20620, 20708, 20786, 20879, 21006, 21138,
+    21238, 21372, 21456, 21567, 21683, 21794, 21912, 22020, 22126, 22241,
+    22361, 22484, 22596, 22725, 22860, 22979, 23091, 23207, 23329, 23445,
+    23569, 23681, 23800, 23911, 24021, 24135, 24257, 24375, 24492, 24611,
 ]
 
 
 def coco_image_ids(n_images: int) -> List[int]:
     """Return a deterministic list of `n_images` COCO val2017 ids."""
-    if n_images <= len(COCO_KNOWN_IDS):
-        return COCO_KNOWN_IDS[:n_images]
-    # Extrapolate by repeating with a fixed stride beyond the known list.
-    extra = []
-    cur = COCO_KNOWN_IDS[-1] + 121
-    while len(COCO_KNOWN_IDS) + len(extra) < n_images:
-        extra.append(cur)
+    if n_images <= len(COCO_VAL2017_IDS):
+        return COCO_VAL2017_IDS[:n_images]
+    # Extrapolate beyond the curated list with a fixed stride.
+    out = list(COCO_VAL2017_IDS)
+    cur = COCO_VAL2017_IDS[-1] + 121
+    while len(out) < n_images:
+        out.append(cur)
         cur += 121
-    return COCO_KNOWN_IDS + extra
-
-
-def discover_local_photographs(images_dir: str = "images",
-                               target_size=(512, 512),
-                               include_skimage: bool = True) -> List[str]:
-    """
-    Enumerate every real photograph available *locally* (no network).
-
-    Combines:
-      * everything in `images_dir` that looks like a colour photo
-        (cover.png, the already-downloaded coco_*.png, etc.);
-      * the natural-image sample set shipped with scikit-image
-        (astronaut, cat, coffee, chelsea, rocket, hubble_deep_field,
-        colorwheel) — cached to `images_dir/skimage_*.png`.
-
-    Returns the list of file paths, all resized to `target_size`.
-    """
-    os.makedirs(images_dir, exist_ok=True)
-    out: List[str] = []
-
-    # Local files
-    if os.path.isdir(images_dir):
-        for name in sorted(os.listdir(images_dir)):
-            if not name.lower().endswith((".png", ".jpg", ".jpeg")):
-                continue
-            if name == "qr_secret.png" or name == "secret.png":
-                continue
-            path = os.path.join(images_dir, name)
-            try:
-                img = Image.open(path).convert("RGB")
-                if target_size is not None and img.size != target_size:
-                    img = img.resize(target_size, Image.LANCZOS)
-                    img.save(path)
-                out.append(path)
-            except Exception:
-                continue
-
-    # scikit-image samples — real photographs included with the package
-    if include_skimage:
-        try:
-            from skimage import data as _skd
-            for name in ("astronaut", "cat", "coffee", "chelsea",
-                         "rocket", "hubble_deep_field", "colorwheel"):
-                cached = os.path.join(images_dir, f"skimage_{name}.png")
-                if cached in out:
-                    continue
-                if not os.path.exists(cached):
-                    try:
-                        arr = getattr(_skd, name)()
-                        if arr.ndim != 3 or arr.shape[2] < 3:
-                            continue
-                        arr = arr[..., :3]
-                        img = Image.fromarray(arr.astype(np.uint8))
-                        if target_size is not None:
-                            img = img.resize(target_size, Image.LANCZOS)
-                        img.save(cached)
-                    except Exception:
-                        continue
-                out.append(cached)
-        except ImportError:
-            pass
-
-    # Deduplicate while preserving order
-    seen = set()
-    deduped = []
-    for p in out:
-        if p not in seen:
-            seen.add(p)
-            deduped.append(p)
-    return deduped
+    return out
 
 
 def download_one(image_id: int, save_dir: str,
@@ -223,8 +162,6 @@ def evaluate_configuration(cover: np.ndarray,
     stego = stego_engine.encode(cover, secret, mask=mask)
     recovered = stego_engine.decode(stego)
 
-    # Resize secret the same way the encoder does, so per-pixel metrics
-    # compare like-with-like.
     secret_resized = stego_engine._resize_secret(cover, secret)
 
     psnr = compute_psnr(cover, stego)
@@ -261,14 +198,14 @@ def evaluate_configuration(cover: np.ndarray,
 # ---------------------------------------------------------------------------
 
 
-def run(n_images: int,
-        alphas: Sequence[float],
-        modes: Sequence[str],
+def run(n_images: int = 100,
+        alphas: Sequence[float] = (0.001, 0.005, 0.01, 0.02, 0.05, 0.1),
+        modes: Sequence[str] = ("svd_only", "svd_texture", "svd_yolo"),
         out_dir: str = "output/large_scale",
         images_dir: str = "images",
         qr_text: str = "Progetto Statistical Methods",
-        target_size=(512, 512),
-        offline: bool = False) -> str:
+        target_size: Tuple[int, int] = (512, 512)) -> str:
+    """Run the full sweep and write CSV / plot outputs."""
     os.makedirs(out_dir, exist_ok=True)
 
     secret = generate_qr_secret(text=qr_text, size=target_size[0])
@@ -281,41 +218,10 @@ def run(n_images: int,
             print(f"  [warn] YOLO unavailable ({e}); falling back to texture mode")
             modes = [m if m != "svd_yolo" else "svd_texture" for m in modes]
 
-    # Resolve the list of cover images to evaluate ------------------------
-    image_paths: List[Tuple[str, str]] = []   # (id_label, path)
-    if not offline:
-        ids = coco_image_ids(n_images)
-        for image_id in ids:
-            path = download_one(image_id, images_dir, target_size=target_size)
-            if path:
-                image_paths.append((f"coco_{image_id:012d}", path))
-            if len(image_paths) >= n_images:
-                break
-
-    if len(image_paths) < n_images:
-        # Top up from local photographs (no network needed) ---------------
-        already = {p for _, p in image_paths}
-        for p in discover_local_photographs(images_dir, target_size):
-            if p in already:
-                continue
-            label = os.path.splitext(os.path.basename(p))[0]
-            image_paths.append((label, p))
-            if len(image_paths) >= n_images:
-                break
-
-    if not image_paths:
-        raise RuntimeError(
-            "No cover images available. Network is blocked and no local "
-            "photographs were found under `images/`."
-        )
-
-    print(f"Evaluating on {len(image_paths)} cover images "
-          f"(requested {n_images}), modes={list(modes)}, alphas={list(alphas)}")
-    if len(image_paths) < n_images:
-        print(f"  [info] only {len(image_paths)} unique cover images are "
-              "available locally; for the full study run the script in an "
-              "environment with network access to images.cocodataset.org.")
-    print(f"Total runs: {len(image_paths) * len(modes) * len(alphas)}")
+    ids = coco_image_ids(n_images)
+    print(f"Evaluating on {len(ids)} COCO val2017 images, "
+          f"modes={list(modes)}, alphas={list(alphas)}")
+    print(f"Total runs: {len(ids) * len(modes) * len(alphas)}")
 
     csv_path = os.path.join(out_dir, "metrics.csv")
     fieldnames = [
@@ -331,7 +237,11 @@ def run(n_images: int,
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for idx, (image_id, path) in enumerate(image_paths, 1):
+        for idx, image_id in enumerate(ids, 1):
+            path = download_one(image_id, images_dir, target_size=target_size)
+            if not path:
+                n_fail += 1
+                continue
             try:
                 cover = load_image(path)
             except Exception as e:
@@ -348,7 +258,7 @@ def run(n_images: int,
                         print(f"  [warn] {image_id} {mode} α={alpha}: {e}")
                         continue
                     row = {
-                        "image_id": image_id,
+                        "image_id": f"coco_{image_id:012d}",
                         "image_path": path,
                         **m,
                     }
@@ -357,8 +267,8 @@ def run(n_images: int,
             n_ok += 1
             elapsed = time.time() - t0
             rate = n_ok / max(elapsed, 1e-6)
-            eta = (len(image_paths) - idx) / max(rate, 1e-6)
-            print(f"  [{idx:3d}/{len(image_paths)}] image {image_id} OK "
+            eta = (len(ids) - idx) / max(rate, 1e-6)
+            print(f"  [{idx:3d}/{len(ids)}] image {image_id} OK "
                   f"({elapsed:.1f}s elapsed, ETA {eta:.0f}s)")
 
     print(f"\nDone. {n_ok} images processed, {n_fail} skipped. "
@@ -378,14 +288,13 @@ def run(n_images: int,
 
 
 def aggregate(csv_path: str, out_dir: str) -> str:
-    """Compute mean / std / QR success rate grouped by (mode, alpha)."""
-    rows = []
+    """Compute mean / std / QR success rate grouped by (mode, α)."""
+    rows: List[Dict[str, str]] = []
     with open(csv_path) as f:
         for r in csv.DictReader(f):
             rows.append(r)
 
-    # group key -> list of dicts
-    groups: Dict[str, List[Dict[str, str]]] = {}
+    groups: Dict[Tuple[str, float], List[Dict[str, str]]] = {}
     for r in rows:
         key = (r["mode"], float(r["alpha"]))
         groups.setdefault(key, []).append(r)
@@ -441,7 +350,7 @@ def plot_summary(csv_path: str, out_dir: str) -> str:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    rows = []
+    rows: List[Dict[str, str]] = []
     with open(csv_path) as f:
         for r in csv.DictReader(f):
             rows.append(r)
@@ -450,6 +359,7 @@ def plot_summary(csv_path: str, out_dir: str) -> str:
 
     modes = sorted(set(r["mode"] for r in rows))
     alphas = sorted(set(float(r["alpha"]) for r in rows))
+    n_unique_images = len(set(r["image_id"] for r in rows))
 
     def filt(mode, alpha, col):
         return np.array([float(r[col]) for r in rows
@@ -473,7 +383,7 @@ def plot_summary(csv_path: str, out_dir: str) -> str:
     axes[0, 0].set_xscale("log")
     axes[0, 0].set_xlabel(r"$\alpha$")
     axes[0, 0].set_ylabel("PSNR(cover, stego) [dB]")
-    axes[0, 0].set_title(f"Imperceptibility — {len(set(r['image_id'] for r in rows))} COCO images")
+    axes[0, 0].set_title(f"Imperceptibility — {n_unique_images} COCO val2017 images")
     axes[0, 0].grid(alpha=0.3)
     axes[0, 0].legend()
 
@@ -493,17 +403,18 @@ def plot_summary(csv_path: str, out_dir: str) -> str:
     axes[0, 1].legend()
 
     # QR success rate vs alpha
-    width = 0.25
+    width = 0.8 / max(len(modes), 1)
     x_pos = np.arange(len(alphas))
     for i, mode in enumerate(modes):
         rates = [np.mean(filt(mode, a, "qr_decoded")) * 100 for a in alphas]
-        axes[1, 0].bar(x_pos + (i - 1) * width, rates, width,
+        axes[1, 0].bar(x_pos + (i - (len(modes) - 1) / 2) * width, rates, width,
                        label=mode, color=colors.get(mode), edgecolor="black")
     axes[1, 0].set_xticks(x_pos)
     axes[1, 0].set_xticklabels([str(a) for a in alphas], rotation=45)
     axes[1, 0].set_xlabel(r"$\alpha$")
     axes[1, 0].set_ylabel("QR decode success rate (%)")
     axes[1, 0].set_title("QR code recovery (binary metric)")
+    axes[1, 0].set_ylim(0, 110)
     axes[1, 0].grid(alpha=0.3, axis="y")
     axes[1, 0].legend()
 
@@ -523,7 +434,8 @@ def plot_summary(csv_path: str, out_dir: str) -> str:
     axes[1, 1].grid(alpha=0.3)
     axes[1, 1].legend()
 
-    plt.suptitle("Large-scale evaluation summary", fontsize=14, fontweight="bold")
+    plt.suptitle(f"Large-scale evaluation on {n_unique_images} COCO val2017 images",
+                 fontsize=14, fontweight="bold")
     plt.tight_layout()
     out_path = os.path.join(out_dir, "large_scale_summary.png")
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
@@ -553,20 +465,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--n-images", type=int, default=100,
-                        help="Number of COCO val2017 images to evaluate.")
+                        help="Number of COCO val2017 images to evaluate (default: 100).")
     parser.add_argument("--alphas", type=_parse_floats,
                         default=[0.001, 0.005, 0.01, 0.02, 0.05, 0.1],
-                        help="Comma-separated list of α values.")
+                        help="Comma-separated list of α values "
+                             "(default: 0.001,0.005,0.01,0.02,0.05,0.1).")
     parser.add_argument("--modes", type=_parse_modes,
                         default=["svd_only", "svd_texture", "svd_yolo"],
-                        help="Comma-separated list of modes.")
+                        help="Comma-separated list of modes "
+                             "(default: svd_only,svd_texture,svd_yolo).")
     parser.add_argument("--out-dir", default="output/large_scale",
                         help="Output directory for CSVs and plots.")
     parser.add_argument("--images-dir", default="images",
                         help="Directory where COCO images are cached.")
-    parser.add_argument("--offline", action="store_true",
-                        help="Skip COCO downloads; use only locally available "
-                             "real photographs (images/*.png/jpg and scikit-image samples).")
     args = parser.parse_args()
 
     run(
@@ -575,7 +486,6 @@ def main():
         modes=args.modes,
         out_dir=args.out_dir,
         images_dir=args.images_dir,
-        offline=args.offline,
     )
 
 

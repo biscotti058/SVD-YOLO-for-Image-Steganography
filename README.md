@@ -85,11 +85,15 @@ Or in VS Code / Cursor, just open `demo.ipynb` and run all cells.
 
 COCO images are downloaded automatically on first run (requires internet). If network is unavailable, a synthetic fallback cover image is generated.
 
-### 3. Run the large-scale evaluation (optional, may take 30–60 minutes)
+### 3. Run the large-scale evaluation on COCO val2017 (recommended)
 
 ```bash
-python -m src.large_scale_eval --n-images 100 --alphas 0.001,0.005,0.01,0.02,0.05,0.1
+python -m src.large_scale_eval --n-images 100 \
+    --alphas 0.001,0.005,0.01,0.02,0.05,0.1 \
+    --modes svd_only,svd_texture,svd_yolo
 ```
+
+This is the canonical experiment of the project: 100 COCO val2017 images × 3 modes × 6 α values = 1800 configurations. The images are downloaded automatically from `images.cocodataset.org` on first run and cached under `images/`. Total time on CPU: 30–60 minutes.
 
 Results are written to `output/large_scale/`:
 - `metrics.csv` — per-image metrics for every (mode, α) configuration
