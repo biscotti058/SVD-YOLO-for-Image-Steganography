@@ -69,6 +69,35 @@ def _ensure_alpha_eff(rows: List[Dict[str, str]]) -> None:
         r["alpha_eff"] = alpha * (fm / fp) if fp > 0 else alpha
 
 
+def _prediction_uses_alpha_eff(rows: List[Dict[str, str]]) -> bool:
+    """
+    Detect whether the CSV's `psnr_predicted` column was computed with
+    `alpha_eff` (fixed code) or with `alpha` (older code) by inspecting
+    a masked row.  Returns True if fixed-code semantics.
+    """
+    for r in rows:
+        a = float(r["alpha"])
+        a_eff = float(r["alpha_eff"])
+        if abs(a - a_eff) / max(a, 1e-9) > 0.05:  # mask actually attenuated alpha
+            fp = float(r["frob_predicted"])
+            # If frob_predicted ≈ alpha_eff * ||S||_F (fixed), then
+            # frob_predicted / alpha_eff is a constant ≈ ||S||_F.
+            # If frob_predicted ≈ alpha * ||S||_F (old), then
+            # frob_predicted / alpha is the constant.
+            # Use svd_only rows to fix ||S||_F, then compare.
+            for r2 in rows:
+                if r2["mode"] == "svd_only":
+                    a2 = float(r2["alpha"])
+                    fp2 = float(r2["frob_predicted"])
+                    sfrob = fp2 / a2  # ||S||_F derived from svd_only (alpha==alpha_eff)
+                    pred_with_eff = a_eff * sfrob
+                    pred_with_nom = a * sfrob
+                    # Whichever is closer to fp wins
+                    return abs(fp - pred_with_eff) < abs(fp - pred_with_nom)
+            return True
+    return True  # default to "fixed semantics" when undetectable
+
+
 def _psnr_from_frob(frob: float, n_pixels_total: float) -> float:
     """PSNR for an L2 distortion `frob` between two images of `n_pixels_total` cells."""
     if frob <= 0:
@@ -163,31 +192,39 @@ def plot_pareto(rows, out_path):
 def plot_theory_vs_measured(rows, out_path):
     """
     Two columns × three rows:
-        left:  prediction made with the *nominal* alpha
+        left:  prediction made with the *nominal* alpha (ignores the mask)
         right: prediction made with the *effective* alpha = alpha · (0.1 + 0.9·mean_mask)
 
     Only the right-hand column is a fair test of the Frobenius identity
-    for masked modes.  The left-hand column quantifies the attenuation of
-    the embedding caused by the mask, expressed in dB.
+    for masked modes.  The left-hand column quantifies the attenuation
+    of the embedding caused by the mask, expressed in dB.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    fixed = _prediction_uses_alpha_eff(rows)
     modes = ["svd_only", "svd_texture", "svd_yolo"]
     fig, axes = plt.subplots(len(modes), 2, figsize=(13, 14))
 
     for row_idx, mode in enumerate(modes):
         grp = _by(rows, mode=mode)
-        pred_nominal = _arr(grp, "psnr_predicted")  # built with alpha nominal
+        pred_csv = _arr(grp, "psnr_predicted")
         meas = _arr(grp, "psnr")
         alpha = _arr(grp, "alpha")
         alpha_eff = _arr(grp, "alpha_eff")
-        # Closed-form prediction with alpha_eff: shift by 20*log10(alpha/alpha_eff).
-        pred_eff = pred_nominal + 20.0 * np.log10(alpha / alpha_eff)
+        # Shift between the two semantics: PSNR(small_alpha) = PSNR(big_alpha) + 20·log10(big/small).
+        shift = 20.0 * np.log10(alpha / np.maximum(alpha_eff, 1e-12))  # ≥ 0
+        if fixed:
+            pred_eff = pred_csv
+            pred_nominal = pred_csv - shift  # nominal is smaller (more pessimistic)
+        else:
+            pred_nominal = pred_csv
+            pred_eff = pred_csv + shift
 
         for col_idx, (pred, label) in enumerate(
-                [(pred_nominal, "nominal α"), (pred_eff, "effective α")]):
+                [(pred_nominal, "nominal α (ignores mask)"),
+                 (pred_eff, "effective α (Frobenius identity)")]):
             ax = axes[row_idx, col_idx]
             delta = meas - pred
             ssr = np.sum((meas - pred) ** 2)
@@ -213,7 +250,7 @@ def plot_theory_vs_measured(rows, out_path):
 
     plt.suptitle("Closed-form PSNR prediction vs measurement\n"
                  "Left column: nominal α (over-predicts distortion for masked modes).\n"
-                 "Right column: effective α — the Frobenius identity is exact.",
+                 "Right column: effective α — the Frobenius identity is exact (modulo clipping).",
                  fontsize=13, fontweight="bold")
     plt.tight_layout()
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
@@ -362,11 +399,23 @@ def print_summary(rows):
         print("  none found.")
     print()
 
-    # Theory verification (with nominal vs effective alpha)
-    print("Theory vs measurement, prediction made with NOMINAL α:")
+    # Theory verification (with nominal vs effective alpha).
+    # Determine which semantics the CSV uses for psnr_predicted, then
+    # compute both views consistently.
+    fixed = _prediction_uses_alpha_eff(rows)
+    print(f"\nDetected CSV semantics: psnr_predicted was computed with "
+          f"{'alpha_eff (fixed code)' if fixed else 'alpha (old code)'}.")
+
+    print("\nTheory vs measurement, prediction made with NOMINAL α "
+          "(ignores mask attenuation):")
     for mode in modes:
         grp = _by(rows, mode=mode)
-        delta = _arr(grp, "psnr") - _arr(grp, "psnr_predicted")
+        alpha = _arr(grp, "alpha")
+        alpha_eff = _arr(grp, "alpha_eff")
+        shift = 20.0 * np.log10(alpha / np.maximum(alpha_eff, 1e-12))
+        pred_csv = _arr(grp, "psnr_predicted")
+        pred_nominal = pred_csv - shift if fixed else pred_csv
+        delta = _arr(grp, "psnr") - pred_nominal
         print(f"  {mode:<14} mean Δ = {np.mean(delta):+.2f} dB   "
               f"max |Δ| = {np.max(np.abs(delta)):.2f} dB   "
               f"% Δ≥0 = {100 * np.mean(delta >= 0):.0f}%")
@@ -377,12 +426,15 @@ def print_summary(rows):
         grp = _by(rows, mode=mode)
         alpha = _arr(grp, "alpha")
         alpha_eff = _arr(grp, "alpha_eff")
-        pred_eff = _arr(grp, "psnr_predicted") + 20.0 * np.log10(alpha / alpha_eff)
+        shift = 20.0 * np.log10(alpha / np.maximum(alpha_eff, 1e-12))
+        pred_csv = _arr(grp, "psnr_predicted")
+        pred_eff = pred_csv if fixed else pred_csv + shift
         delta = _arr(grp, "psnr") - pred_eff
         print(f"  {mode:<14} mean Δ = {np.mean(delta):+.2f} dB   "
               f"max |Δ| = {np.max(np.abs(delta)):.2f} dB   "
               f"% Δ≥0 = {100 * np.mean(delta >= 0):.0f}%")
-    print("\n(Δ near 0 with effective α confirms ||C* - C||_F = α_eff · ||S||_F.)")
+    print("\n(Δ near 0 with effective α confirms ||C* - C||_F = α_eff · ||S||_F"
+          " up to image clipping.)")
 
 
 def main():

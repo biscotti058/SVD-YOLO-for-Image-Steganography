@@ -54,12 +54,16 @@ governa l'embedding, si derivano i \emph{bound di perturbazione di Weyl e
 Mirsky} che giustificano sia la scelta dei parametri sia il
 compromesso impercettibilità/robustezza, e si fornisce la formula
 chiusa $\PSNR_{\text{pred}}(\alpha)$ utilizzata per selezionare
-$\alpha$ in modo principled.  La sperimentazione viene estesa da~5 a
-\textbf{13 immagini reali} (5 COCO val2017 + 1 cover sintetica + 7
-fotografie reali del pacchetto scikit-image), per un totale di
-$13 \times 3 \times 6 = 234$ configurazioni; gli script
-\texttt{src/large\_scale\_eval.py} sono pronti per estendere
-l'analisi a $\geq 100$ immagini COCO in ambienti con accesso di rete.
+$\alpha$ in modo principled.  La sperimentazione \`e stata estesa a
+\textbf{100 immagini di MS COCO val2017} $\times$ 3 modalit\`a
+$\times$ 6 valori di $\alpha = 1800$ configurazioni totali, per
+verificare numericamente i bound teorici e identificare i punti operativi
+Pareto-ottimali.  La connessione esplicita al programma del corso
+(slide di SVD: pseudoinverso di Moore--Penrose, numero di
+condizionamento $\kappa$, Truncated SVD come regolarizzazione)
+\`e sviluppata in una sezione dedicata, e culmina in un \emph{decoder
+TSVD-regolarizzato} che recupera il QR su attacchi (JPEG, rumore)
+sui quali il decoder standard fallisce.
 \end{abstract}
 
 \tableofcontents
@@ -475,142 +479,190 @@ La stabilità di questo passo è governata dal bound
 \section{Risultati Sperimentali}
 \label{sec:results}
 
-\subsection{Setup}
+\subsection{Setup sperimentale}
 
-Lo script \verb|src/large_scale_eval.py| (\verb|--offline|) esegue
-$\,N_{\text{img}} \times 3 \times 6 = N_{\text{img}}\cdot 18$
+Lo script \verb|src/large_scale_eval.py| esegue
+$\,N_{\text{img}} \times |\text{modes}| \times |\boldsymbol{\alpha}|$
 configurazioni e produce, per ognuna, le metriche
 $\PSNR(C,C^{\star})$, $\SSIM(C,C^{\star})$, $\PSNR(S,\widetilde S)$,
-$\SSIM(S,\widetilde S)$, $\NCC$, $\BER$, esito del decode QR, oltre alla
-distorsione di Frobenius e al PSNR predetto da \eqref{eq:psnr-closed}.
+$\SSIM(S,\widetilde S)$, $\NCC$, $\BER$, esito del decode QR,
+la $\alpha_{\text{eff}}$ effettivamente utilizzata, la distorsione di
+Frobenius e il PSNR predetto da \eqref{eq:psnr-closed}.
 
-In questa revisione si è eseguita la valutazione su
-$N_{\text{img}}=13$ \emph{fotografie reali} accessibili localmente:
-
-\begin{itemize}[leftmargin=*,itemsep=2pt]
-  \item 5 immagini di COCO val2017 (id $139, 785, 872, 1268, 1503$);
-  \item l'immagine di copertura \emph{cover.png} fornita con la prima versione;
-  \item 7 fotografie reali dal pacchetto \verb|scikit-image|
-        (astronaut, cat, coffee, chelsea, rocket, hubble\_deep\_field,
-        colorwheel).
-\end{itemize}
-
-Per un totale di $13 \times 3 \times 6 = 234$ run di
-encoding/decoding/verifica.  Lo script è già pronto per essere
-rieseguito su 100 (o 5000) immagini COCO in un ambiente con accesso di
-rete tramite il comando
-
+Lo studio canonico riportato in questo documento utilizza
+$N_{\text{img}} = 100$ immagini scaricate automaticamente da
+\emph{MS COCO val2017} (id deterministici da \verb|COCO_VAL2017_IDS|),
+ridimensionate a $512\times 512$ pixel, con tutte e tre le modalit\`a
+(\verb|svd_only|, \verb|svd_texture|, \verb|svd_yolo|) e sei valori
+di $\alpha\in\{10^{-3}, 5\!\cdot\!10^{-3}, 10^{-2}, 2\!\cdot\!10^{-2}, 5\!\cdot\!10^{-2}, 10^{-1}\}$.
+Per un totale di $100 \times 3 \times 6 = 1800$ run di
+encoding/decoding/verifica.
+Lo script viene riprodotto da
 \begin{quote}\small
 \verb|python -m src.large_scale_eval --n-images 100 \|\\
 \verb|       --alphas 0.001,0.005,0.01,0.02,0.05,0.1 \|\\
 \verb|       --modes svd_only,svd_texture,svd_yolo|
 \end{quote}
+\noindent
+e tutti i grafici aggregati e le tabelle di analisi sono prodotti
+successivamente da \verb|python -m src.analyze_results|.
 
-\subsection{Verifica teorica}
+\subsection{Verifica teorica della formula chiusa del PSNR}
+\label{sec:theory-verif}
 
-La Tabella~\ref{tab:theory} confronta il PSNR misurato con la
-predizione \eqref{eq:psnr-closed} per la modalità \verb|svd_only|.  La
-deviazione tra misura e predizione è $\leq 2$~dB ed è interamente
-positiva (la misura è sempre $\geq$ della predizione, come previsto
-dall'effetto di clipping).
+La Tabella~\ref{tab:theory} confronta, sulla modalit\`a \verb|svd_only|,
+il PSNR misurato sulle 100 cover con la predizione \eqref{eq:psnr-closed}.
+La deviazione media \`e $\Delta_{\text{mean}} = +1{,}22$~dB con
+$\max|\Delta| = 7{,}05$~dB; il segno positivo \`e dovuto al
+\emph{clipping} dell'immagine \emph{stego} in $[0,255]$, che pu\`o
+solo ridurre la distorsione effettiva (cfr.\ Osservazione 1).
 
 \begin{table}[H]\centering
-\begin{tabular}{cccc}
+\begin{tabular}{ccccc}
 \toprule
-$\alpha$ & $\PSNR_{\text{pred}}$ [dB] & $\PSNR_{\text{measured}}$ [dB] (media $\pm$ dev. std., 13 img) & $\Delta = \PSNR_m - \PSNR_p$ [dB] \\
+$\alpha$ & $\PSNR_{\text{pred}}$ [dB] & $\PSNR_{\text{measured}}$ [dB] (media $\pm$ dev. std., 100 img) & $\Delta_{\text{mean}}$ [dB] & QR \% \\
 \midrule
-$0{,}001$ & 61{,}61 & $61{,}47 \pm 3{,}28$ & $-0{,}14$ \\
-$0{,}005$ & 47{,}63 & $50{,}67 \pm 0{,}63$ & $+3{,}03$ \\
-$0{,}010$ & 41{,}61 & $43{,}58 \pm 0{,}58$ & $+1{,}97$ \\
-$0{,}020$ & 35{,}59 & $36{,}88 \pm 0{,}67$ & $+1{,}29$ \\
-$0{,}050$ & 27{,}63 & $28{,}64 \pm 0{,}87$ & $+1{,}00$ \\
-$0{,}100$ & 21{,}61 & $22{,}81 \pm 1{,}13$ & $+1{,}20$ \\
+$0{,}001$ & $61{,}61$ & $60{,}44 \pm 2{,}02$ & $-1{,}17$ & $\phantom{00}0$ \\
+$0{,}005$ & $47{,}63$ & $50{,}58 \pm 0{,}50$ & $+2{,}95$ & $97$ \\
+$0{,}010$ & $41{,}61$ & $43{,}55 \pm 0{,}63$ & $+1{,}94$ & $98$ \\
+$0{,}020$ & $35{,}59$ & $36{,}89 \pm 0{,}78$ & $+1{,}30$ & $98$ \\
+$0{,}050$ & $27{,}63$ & $28{,}70 \pm 0{,}96$ & $+1{,}07$ & $95$ \\
+$0{,}100$ & $21{,}61$ & $22{,}87 \pm 1{,}13$ & $+1{,}26$ & $90$ \\
 \bottomrule
 \end{tabular}
-\caption{\label{tab:theory}Confronto fra il PSNR predetto in forma chiusa
-\eqref{eq:psnr-closed} e il PSNR misurato (modalità \texttt{svd\_only},
-13 cover, QR di norma di Frobenius
-$\|S\|_F = \,$93\,500 circa).  La differenza non-negativa conferma il
-ruolo di lower-bound della predizione.}
+\caption{\label{tab:theory}Verifica numerica della formula chiusa
+\eqref{eq:psnr-closed} sulla modalit\`a \texttt{svd\_only} aggregata
+sulle 100 cover di COCO val2017 (QR \emph{Progetto Statistical Methods},
+livello correzione H).  $R^{2} = 0{,}974$ sul totale dei $6\cdot 100 = 600$ punti.}
 \end{table}
 
-Il pannello in basso a destra della Figura~\ref{fig:summary} mostra il
-diagramma di dispersione \emph{predicted vs measured}: i punti sono
-quasi tutti sulla retta $y=x$ con la piccola componente positiva attesa.
+\subsection{Frobenius identity per le modalit\`a masked}
+\label{sec:frob-id-empirical}
 
-\subsection{Compromesso \texorpdfstring{$\alpha$}{alpha}: PSNR, SSIM, QR}
+Per le modalit\`a \verb|svd_texture| e \verb|svd_yolo| l'encoder
+utilizza $\alpha_{\text{eff}} = \alpha\,(0{,}1 + 0{,}9\,\bar M)$ con
+$\bar M$ media della maschera; il decoder usa la stessa
+$\alpha_{\text{eff}}$ (cfr.\ \S\ref{sec:embedding}, fix
+\verb|effective_alpha| del modulo \verb|svd_steganography.py|).
+La Tabella~\ref{tab:frob-id} mostra che la \emph{Frobenius identity}
+$\|C^{\star} - C\|_F = \alpha_{\text{eff}}\,\|S\|_F$ \`e verificata
+con $\Delta_{\text{mean}} \in [-0{,}4,\,+1{,}2]$~dB su tutte e tre le
+modalit\`a, mentre l'identit\`a con $\alpha$ \emph{nominale}
+sovrastima sistematicamente la distorsione di
+$+11{,}5$~dB per \verb|svd_texture| e $+6{,}0$~dB per \verb|svd_yolo|:
+il gap quantifica esattamente l'attenuazione introdotta dalla
+maschera, $20\log_{10}(\alpha/\alpha_{\text{eff}})$.
 
-La Tabella~\ref{tab:full} riporta le tre modalità su tutta la sweep di
-$\alpha$ aggregata sulle 13 cover.
-
-\begin{table}[H]\centering\small
-\begin{tabular}{llccccc}
+\begin{table}[H]\centering
+\begin{tabular}{lccc}
 \toprule
-\textbf{Modalità} & $\alpha$ &
-\textbf{PSNR(C,C*)} & \textbf{SSIM(C,C*)} &
-\textbf{PSNR(S,$\tilde S$)} & \textbf{NCC} & \textbf{QR\,\%}\\
+\textbf{Modalit\`a} & $\overline{\bar M}$ & $\Delta_{\text{mean}}$ con $\alpha$ nominale [dB] & $\Delta_{\text{mean}}$ con $\alpha_{\text{eff}}$ [dB]\\
 \midrule
-\verb|svd_only|    & 0{,}001 & $61{,}47 \pm 3{,}28$ & $0{,}9997$ & $\phantom{0}2{,}96$  & $0{,}42$ & $\phantom{00}0\%$ \\
-\verb|svd_only|    & 0{,}005 & $50{,}67 \pm 0{,}63$ & $0{,}9993$ & $\phantom{0}9{,}13$  & $0{,}95$ & $92\%$ \\
-\verb|svd_only|    & 0{,}010 & $43{,}58 \pm 0{,}58$ & $0{,}9983$ & $13{,}95$            & $0{,}99$ & $100\%$ \\
-\verb|svd_only|    & 0{,}020 & $36{,}88 \pm 0{,}67$ & $0{,}9946$ & $17{,}74$            & $0{,}99$ & $100\%$ \\
-\verb|svd_only|    & 0{,}050 & $28{,}64 \pm 0{,}87$ & $0{,}9734$ & $20{,}17$            & $0{,}99$ & $92\%$ \\
-\verb|svd_only|    & 0{,}100 & $22{,}81 \pm 1{,}13$ & $0{,}9233$ & $19{,}67$            & $0{,}97$ & $92\%$ \\
-\midrule
-\verb|svd_texture| & 0{,}001 & $63{,}76 \pm 10{,}87$ & $0{,}9997$ & $\phantom{0}2{,}83$ & $0{,}36$ & $\phantom{00}0\%$ \\
-\verb|svd_texture| & 0{,}010 & $57{,}73 \pm 2{,}10$  & $0{,}9996$ & $\phantom{0}2{,}26$ & $0{,}65$ & $15\%$ \\
-\verb|svd_texture| & 0{,}020 & $50{,}45 \pm 2{,}38$  & $0{,}9993$ & $\phantom{0}3{,}09$ & $0{,}92$ & $85\%$ \\
-\verb|svd_texture| & 0{,}050 & $40{,}98 \pm 1{,}91$  & $0{,}9973$ & $\phantom{0}3{,}66$ & $0{,}99$ & $100\%$ \\
-\verb|svd_texture| & 0{,}100 & $34{,}41 \pm 1{,}76$  & $0{,}9909$ & $\phantom{0}3{,}82$ & $0{,}99$ & $100\%$ \\
-\midrule
-\verb|svd_yolo|    & 0{,}001 & $63{,}76 \pm 10{,}87$ & $0{,}9997$ & $\phantom{0}2{,}83$ & $0{,}36$ & $\phantom{00}0\%$ \\
-\verb|svd_yolo|    & 0{,}010 & $51{,}28 \pm 4{,}44$  & $0{,}9993$ & $\phantom{0}5{,}16$ & $0{,}88$ & $69\%$ \\
-\verb|svd_yolo|    & 0{,}020 & $44{,}18 \pm 4{,}47$  & $0{,}9982$ & $\phantom{0}6{,}41$ & $0{,}97$ & $92\%$ \\
-\verb|svd_yolo|    & 0{,}050 & $35{,}32 \pm 3{,}99$  & $0{,}9917$ & $\phantom{0}7{,}12$ & $0{,}99$ & $100\%$ \\
-\verb|svd_yolo|    & 0{,}100 & $29{,}11 \pm 3{,}82$  & $0{,}9735$ & $\phantom{0}7{,}07$ & $0{,}99$ & $100\%$ \\
+\verb|svd_only|    & $1{,}00$ & $+1{,}22$  & $+1{,}22$ \\
+\verb|svd_texture| & $0{,}18$ & $+11{,}46$ & $-0{,}39$ \\
+\verb|svd_yolo|    & $0{,}56$ & $+5{,}97$  & $+0{,}60$ \\
 \bottomrule
 \end{tabular}
-\caption{\label{tab:full}Metriche medie aggregate sulle 13 cover, per le
-tre modalità e i sei valori di $\alpha$.  Il QR code è considerato
-``decodato'' se restituisce esattamente il testo originale.}
+\caption{\label{tab:frob-id}Conferma empirica dell'identit\`a di
+Frobenius (100 cover, 6 $\alpha$, 600 run per modalit\`a).  La
+colonna sinistra usa $\alpha$ nominale e sovrastima la distorsione;
+quella destra usa $\alpha_{\text{eff}}$ e produce $\Delta\approx 0$,
+confermando la \eqref{eq:frob} con $\alpha\leftarrow\alpha_{\text{eff}}$.}
+\end{table}
+
+\subsection{Compromesso \texorpdfstring{$\alpha$}{alpha}: PSNR, SSIM, recovery, QR}
+
+La Tabella~\ref{tab:full} riporta tutte le metriche aggregate sulle
+100 cover per le tre modalit\`a e i sei $\alpha$.  Il grafico
+riassuntivo \`e in Figura~\ref{fig:summary}.
+
+\begin{table}[H]\centering\small
+\begin{tabular}{llcccccc}
+\toprule
+\textbf{Modalit\`a} & $\alpha$ & $\alpha_{\text{eff}}$ &
+\textbf{PSNR(C,C*)} & \textbf{SSIM} &
+\textbf{PSNR(S,$\tilde S$)} & \textbf{NCC} & \textbf{QR \%}\\
+\midrule
+\verb|svd_only|    & $0{,}001$ & $0{,}0010$  & $60{,}44 \pm 2{,}02$ & $0{,}9996$ & $\phantom{0}2{,}87$ & $0{,}38$ & $\phantom{0}0$ \\
+\verb|svd_only|    & $0{,}005$ & $0{,}0050$  & $50{,}58 \pm 0{,}50$ & $0{,}9993$ & $\phantom{0}9{,}38$ & $0{,}95$ & $97$ \\
+\verb|svd_only|    & $0{,}010$ & $0{,}0100$  & $43{,}55 \pm 0{,}63$ & $0{,}9987$ & $14{,}13$           & $0{,}99$ & $98$ \\
+\verb|svd_only|    & $0{,}020$ & $0{,}0200$  & $36{,}89 \pm 0{,}78$ & $0{,}9965$ & $17{,}84$           & $0{,}99$ & $98$ \\
+\verb|svd_only|    & $0{,}050$ & $0{,}0500$  & $28{,}70 \pm 0{,}96$ & $0{,}9832$ & $19{,}81$           & $0{,}99$ & $95$ \\
+\verb|svd_only|    & $0{,}100$ & $0{,}1000$  & $22{,}87 \pm 1{,}13$ & $0{,}9468$ & $18{,}35$           & $0{,}98$ & $90$ \\
+\midrule
+\verb|svd_texture| & $0{,}001$ & $0{,}00026$ & $60{,}44 \pm 2{,}03$ & $0{,}9996$ & $\phantom{0}4{,}13$ & $0{,}43$ & $\phantom{0}0$ \\
+\verb|svd_texture| & $0{,}005$ & $0{,}00131$ & $60{,}39 \pm 2{,}00$ & $0{,}9996$ & $\phantom{0}2{,}69$ & $0{,}38$ & $\phantom{0}0$ \\
+\verb|svd_texture| & $0{,}010$ & $0{,}00262$ & $57{,}45 \pm 2{,}18$ & $0{,}9996$ & $\phantom{0}4{,}03$ & $0{,}62$ & $\phantom{0}5$ \\
+\verb|svd_texture| & $0{,}020$ & $0{,}00524$ & $50{,}34 \pm 2{,}24$ & $0{,}9993$ & $\phantom{0}9{,}40$ & $0{,}94$ & $88$ \\
+\verb|svd_texture| & $0{,}050$ & $0{,}01311$ & $41{,}16 \pm 2{,}22$ & $0{,}9982$ & $15{,}48$           & $0{,}99$ & $98$ \\
+\verb|svd_texture| & $0{,}100$ & $0{,}02622$ & $34{,}66 \pm 2{,}15$ & $0{,}9946$ & $18{,}55$           & $0{,}99$ & $97$ \\
+\midrule
+\verb|svd_yolo|    & $0{,}001$ & $0{,}00061$ & $60{,}44 \pm 2{,}03$ & $0{,}9996$ & $\phantom{0}3{,}50$ & $0{,}40$ & $\phantom{0}0$ \\
+\verb|svd_yolo|    & $0{,}005$ & $0{,}00304$ & $55{,}82 \pm 3{,}80$ & $0{,}9995$ & $\phantom{0}5{,}57$ & $0{,}71$ & $37$ \\
+\verb|svd_yolo|    & $0{,}010$ & $0{,}00608$ & $49{,}86 \pm 5{,}40$ & $0{,}9992$ & $\phantom{0}9{,}68$ & $0{,}87$ & $73$ \\
+\verb|svd_yolo|    & $0{,}020$ & $0{,}01216$ & $42{,}95 \pm 5{,}36$ & $0{,}9982$ & $14{,}11$           & $0{,}97$ & $91$ \\
+\verb|svd_yolo|    & $0{,}050$ & $0{,}03041$ & $34{,}29 \pm 4{,}93$ & $0{,}9920$ & $18{,}06$           & $0{,}99$ & $97$ \\
+\verb|svd_yolo|    & $0{,}100$ & $0{,}06082$ & $28{,}17 \pm 4{,}67$ & $0{,}9742$ & $18{,}88$           & $0{,}98$ & $94$ \\
+\bottomrule
+\end{tabular}
+\caption{\label{tab:full}Metriche medie su 100 cover di COCO val2017
+per le tre modalit\`a e i sei valori di $\alpha$.  La colonna
+$\alpha_{\text{eff}}$ \`e la media empirica dell'embedding effettivo
+$\alpha\,(0{,}1 + 0{,}9\,\bar M)$ sulle 100 cover.}
 \end{table}
 
 \begin{figure}[H]\centering
 \includegraphics[width=0.95\linewidth]{output/large_scale/large_scale_summary.png}
-\caption{\label{fig:summary}Riepilogo della valutazione su 13 cover:
-PSNR e SSIM al variare di $\alpha$ con barre d'errore; tasso di
-decodifica QR per modalità; confronto teoria/misura.  Le bande verdi
-nei pannelli a sinistra confermano l'intervallo
-$\alpha \in [0{,}005,\, 0{,}02]$ come finestra ottimale per la
-modalità \texttt{svd\_only}.}
+\caption{\label{fig:summary}Riepilogo della valutazione su 100 cover COCO val2017:
+PSNR e SSIM al variare di $\alpha$ con barre d'errore (alto); tasso di
+decodifica QR per modalit\`a (basso-sinistra); dispersione predetto vs misurato
+per \texttt{svd\_only} (basso-destra, $R^{2} = 0{,}974$).}
+\end{figure}
+
+\begin{figure}[H]\centering
+\includegraphics[width=0.85\linewidth]{output/large_scale/02_pareto_psnr_vs_qr.png}
+\caption{\label{fig:pareto}Frontiera di Pareto impercettibilit\`a /
+robustezza (100 cover COCO val2017).  \texttt{svd\_only} domina:
+$(\alpha\!=\!0{,}005)$ raggiunge $\PSNR\!=\!50{,}6$~dB e
+$\text{QR}\!=\!97\%$; $(\alpha\!=\!0{,}01)$ raggiunge
+$\PSNR\!=\!43{,}6$~dB e $\text{QR}\!=\!98\%$.  Le modalit\`a masked
+non spostano il fronte perch\'e l'attenuazione $\bar M$ \`e una pura
+rescaling di $\alpha$.}
 \end{figure}
 
 \subsection{Interpretazione: ruolo dei valori singolari nell'embedding}
 
-Tre osservazioni emergono dalla Tabella~\ref{tab:full}:
+Le tre osservazioni principali sui 1800 run sono:
 
 \begin{enumerate}[leftmargin=*,itemsep=3pt]
-  \item \textbf{Modalità \texttt{svd\_only}.}  La predizione
-        \eqref{eq:psnr-closed} è verificata quasi esattamente
-        (Tabella~\ref{tab:theory}); il QR è decodificato al 100\% per
-        $\alpha \in [0{,}01,\, 0{,}02]$.  Questa coincidenza tra
-        finestra teorica $\alpha^{\star}(30\text{--}50~\mathrm{dB})$
-        e finestra empirica conferma il valore predittivo della
-        teoria.
-  \item \textbf{Modalità \texttt{svd\_texture} e \texttt{svd\_yolo}.}
-        La maschera abbassa $\alpha_{\text{eff}}$ tramite
-        \eqref{eq:alpha-eff}; il PSNR misurato è di conseguenza
-        \emph{più alto} che per \texttt{svd\_only} a parità di
-        $\alpha$ nominale, ma il bound di Mirsky
-        \eqref{eq:robustness-bound} si attiva con $\alpha_{\text{eff}}$
-        più piccolo --- e quindi $1/\alpha_{\text{eff}}$ più grande ---
-        deteriorando la qualità del segreto recuperato.  La finestra
-        ``QR=100\%'' si sposta verso $\alpha\geq 0{,}05$.
-  \item \textbf{Finestra operativa robusta.}  Combinando il vincolo
-        di impercettibilità ($\PSNR\geq 30$~dB) con quello di
-        decodifica QR ($\geq 95\%$), la finestra raccomandata è
-        $\alpha\in[0{,}005,\,0{,}02]$ in \texttt{svd\_only} e
-        $\alpha\in[0{,}02,\,0{,}05]$ in \texttt{svd\_yolo}.
+  \item \textbf{Modalit\`a \texttt{svd\_only}.}  La formula chiusa
+        \eqref{eq:psnr-closed} \`e verificata con $R^{2} = 0{,}974$ su
+        600 punti, errore medio $+1{,}22$~dB di clipping.  Il punto
+        operativo Pareto-ottimale \`e $\alpha = 0{,}005$
+        ($\PSNR = 50{,}6$ dB, QR $= 97\%$) o $\alpha = 0{,}01$
+        ($\PSNR = 43{,}6$ dB, QR $= 98\%$): impercettibilit\`a
+        eccellente con decodifica praticamente garantita.
+  \item \textbf{Modalit\`a \texttt{svd\_texture} e \texttt{svd\_yolo}.}
+        La maschera abbassa $\alpha_{\text{eff}}$
+        ($\overline{\bar M}_{\text{texture}} = 0{,}18$,
+        $\overline{\bar M}_{\text{yolo}} = 0{,}56$).  Il PSNR misurato
+        \`e di conseguenza pi\`u alto a parit\`a di $\alpha$ nominale,
+        ma il bound di Mirsky \eqref{eq:robustness-bound} si attiva
+        con $\alpha_{\text{eff}}$ pi\`u piccolo, deteriorando la
+        recovery e spostando la finestra QR$\geq 95\%$ verso
+        $\alpha \geq 0{,}05$.  Sul Pareto frontier
+        (Figura~\ref{fig:pareto}), \verb|svd_only| domina entrambe le
+        modalit\`a masked.  Una vera modulazione \emph{spaziale} via
+        block-SVD (cfr.\ \S~Future Work) potrebbe spostare il fronte;
+        la modulazione globale via $\bar M$ \`e equivalente a una
+        rescaling di $\alpha$.
+  \item \textbf{Finestra operativa raccomandata.}  Per
+        \texttt{svd\_only}: $\alpha\in[0{,}005,\,0{,}02]$
+        ($\PSNR\geq 36{,}9$ dB, QR$= 98\%$). Per
+        \texttt{svd\_texture}: $\alpha\in[0{,}05,\,0{,}1]$
+        ($\PSNR\geq 34{,}7$ dB, QR$\geq 97\%$).  Per
+        \texttt{svd\_yolo}: $\alpha\geq 0{,}05$
+        ($\PSNR\geq 34{,}3$ dB, QR$\geq 97\%$).
 \end{enumerate}
 
 
@@ -799,26 +851,34 @@ collasso della ricostruzione.
         \eqref{eq:robustness-bound}, che spiega quantitativamente il
         compromesso fra impercettibilità ($\alpha$ piccolo) e robustezza
         ($\alpha$ grande).
-  \item La \textbf{sperimentazione estesa} a 13 fotografie reali
-        ($234$ configurazioni totali) conferma in modo aggregato i bound
-        teorici: lo scostamento fra PSNR predetto e misurato è
-        $\leq 2$~dB e di segno costante.
-  \item L'intervallo operativo raccomandato in modalità SVD pura è
-        $\alpha\in[0{,}005,\,0{,}02]$, con QR decodato al 100\% per
-        $\alpha = 0{,}01$ su tutte le 13 cover testate.
+  \item La \textbf{sperimentazione estesa} a 100 cover di COCO val2017
+        ($1800$ configurazioni totali) conferma in modo aggregato i
+        bound teorici: $R^{2} = 0{,}974$ sulla regressione PSNR
+        predetto vs misurato in \verb|svd_only|; identit\`a di
+        Frobenius rispettata a $\Delta_{\text{mean}}\in [-0{,}4,\,+1{,}2]$~dB
+        su tutte le modalit\`a.
+  \item L'intervallo operativo raccomandato in modalit\`a SVD pura \`e
+        $\alpha\in[0{,}005,\,0{,}02]$: PSNR $\geq 36{,}9$~dB e QR
+        decodato al 98\% (97\% a $\alpha=0{,}005$).
+  \item Il \textbf{decoder TSVD-regolarizzato} (\S\ref{sec:tsvd-decoder})
+        \`e un contributo originale che recupera il QR su 4 attacchi
+        su 6 (JPEG $Q=50$, $Q=20$, rumore $\sigma=5$, $\sigma=15$),
+        sui quali il decoder standard fallisce, con guadagno PSNR
+        $+2$ a $+5$~dB.
 \end{itemize}
 
 \subsection{Limitazioni}
 
 \begin{itemize}[leftmargin=*,itemsep=2pt]
-  \item Steganografia \textbf{non cieca}: il destinatario deve ricevere
-        il file \verb|keys.npz| con $(U_C, V_C, \Sigma_C, U_S, V_S)$.
-  \item Il payload non è cifrato (vedi §\ref{sec:future}).
-  \item La sperimentazione è stata svolta su 13 immagini reali per
-        vincoli di rete dell'ambiente di valutazione.  Lo script
-        \verb|src/large_scale_eval.py| è già funzionalmente completo
-        per estendere immediatamente l'analisi al subset val2017
-        completo o oltre.
+  \item Steganografia \textbf{non cieca}: il destinatario deve
+        ricevere il file \verb|keys.npz| con $(U_C, V_C, \Sigma_C, U_S, V_S)$
+        e l'$\alpha_{\text{eff}}$ usata in encoding.
+  \item Il payload non \`e cifrato (vedi §\ref{sec:future}).
+  \item L'evidenza empirica (Figura~\ref{fig:pareto}) mostra che la
+        guida YOLO/texture non porta beneficio Pareto: la modulazione
+        globale via $\bar M$ \`e equivalente a una rescaling di
+        $\alpha$.  Una vera modulazione spaziale richiederebbe
+        block-SVD (\S\ref{sec:future}).
 \end{itemize}
 
 \subsection{Sviluppi futuri}
